@@ -131,16 +131,18 @@ Italian TSO Terna developed a probabilistic methodology:
 
 ### 4.1 Generation Source Properties
 
-| Property | Nuclear | Gas CCGT | Wind (Onshore) | Wind (Offshore) | Solar PV | Hydro (Reservoir) |
-|----------|---------|----------|-----------------|-----------------|----------|-------------------|
-| Typical capacity (GW) | 0.5–1.6 per unit | 0.3–0.9 | 0.002–0.015 per turbine | 0.006–0.015 per turbine | Varies | 0.1–2.0 |
-| Capacity factor (%) | 85–93 | 40–60 | 25–45 | 35–55 | 10–25 | 20–60 |
-| Ramp rate | Very slow (hours) | Fast (minutes) | Weather-dependent | Weather-dependent | Weather-dependent | Fast (seconds–minutes) |
-| Dispatchability | Baseload | Flexible/peaking | Non-dispatchable | Non-dispatchable | Non-dispatchable | Dispatchable |
-| Inertia contribution | High (synchronous) | High (synchronous) | None (inverter-based) | None (inverter-based) | None (inverter-based) | High (synchronous) |
-| Fuel dependency | Uranium supply chain | Gas pipeline/LNG | None | None | None | Water/rainfall |
-| Start-up time | 24–72 hours (cold) | 0.5–4 hours | Immediate (wind permitting) | Immediate (wind permitting) | Immediate (sun permitting) | Minutes |
-| Marginal cost (£/MWh) | 5–15 | 30–80 (gas price dependent) | 0–5 | 0–5 | 0–5 | 0–10 |
+| Property | Nuclear | Gas CCGT | Coal | Biomass/Biofuel | Wind (Onshore) | Wind (Offshore) | Solar PV | Hydro (Reservoir) |
+|----------|---------|----------|------|-----------------|-----------------|-----------------|----------|-------------------|
+| Typical capacity (GW) | 0.5–1.6 per unit | 0.3–0.9 | 0.3–1.0 per unit | 0.01–0.5 | 0.002–0.015 per turbine | 0.006–0.015 per turbine | Varies | 0.1–2.0 |
+| Capacity factor (%) | 85–93 | 40–60 | 50–80 | 60–90 | 25–45 | 35–55 | 10–25 | 20–60 |
+| Ramp rate | Very slow (hours) | Fast (minutes) | Slow–moderate (hours) | Moderate (tens of minutes) | Weather-dependent | Weather-dependent | Weather-dependent | Fast (seconds–minutes) |
+| Dispatchability | Baseload | Flexible/peaking | Baseload/mid-merit | Baseload/mid-merit | Non-dispatchable | Non-dispatchable | Non-dispatchable | Dispatchable |
+| Inertia contribution | High (synchronous) | High (synchronous) | High (synchronous) | Moderate–high (synchronous) | None (inverter-based) | None (inverter-based) | None (inverter-based) | High (synchronous) |
+| Fuel dependency | Uranium supply chain | Gas pipeline/LNG | Coal supply chain (rail/port), stockpile levels | Biomass feedstock supply (wood pellets, agricultural waste, energy crops) | None | None | None | Water/rainfall |
+| Start-up time | 24–72 hours (cold) | 0.5–4 hours | 6–24 hours (cold), 2–6 hours (warm) | 2–8 hours (cold), 0.5–2 hours (warm) | Immediate (wind permitting) | Immediate (wind permitting) | Immediate (sun permitting) | Minutes |
+| Marginal cost (£/MWh) | 5–15 | 30–80 (gas price dependent) | 35–70 (coal + carbon price dependent) | 40–100 (feedstock dependent) | 0–5 | 0–5 | 0–5 | 0–10 |
+| Emissions (gCO₂/kWh) | ~0 (operational) | 350–450 | 800–1000 | ~0 to 120 (lifecycle dependent) | ~0 | ~0 | ~0 | ~0 |
+| Key constraints | Safety regulations, cooling water availability, waste handling | Gas price volatility, pipeline access | Carbon pricing, phase-out policies, air quality regulation | Feedstock logistics, storage, sustainability certification (e.g., SBP) | Siting, curtailment risk | Offshore access, cable capacity | Land use, grid hosting capacity | Geography, environmental flows |
 
 ### 4.2 Storage Properties
 
@@ -189,8 +191,11 @@ Italian TSO Terna developed a probabilistic methodology:
 | Scenario | Trigger | Cascading Effects | Problem-Solver Actions |
 |----------|---------|-------------------|----------------------|
 | Nuclear trip (sudden loss of 1–3 GW) | Equipment failure, safety shutdown | Frequency drop, reserve activation, price spike | Activate BESS, ramp gas, demand curtailment, interconnector imports |
-| Gas supply disruption | Pipeline failure, geopolitical event | Gas CCGT unavailable, price shock, fuel switching | Maximise renewables, storage dispatch, demand response, coal/oil backup |
-| Wind drought (Dunkelflaute) | Sustained high-pressure weather system | Days of low wind + solar output | Storage depletion, fossil ramp-up, imports, demand curtailment |
+| Gas supply disruption | Pipeline failure, geopolitical event | Gas CCGT unavailable, price shock, fuel switching | Maximise renewables, storage dispatch, demand response, coal/biomass backup |
+| Coal supply chain disruption | Port/rail logistics failure, import ban, stockpile depletion | Coal plant forced offline or derated, merit order shift | Ramp gas CCGT, activate BESS, increase imports, demand response |
+| Biomass feedstock shortage | Supply chain disruption, harvest failure, sustainability certification revoked | Biomass plant derated or offline, loss of dispatchable low-carbon capacity | Ramp gas/coal backup, storage dispatch, renewable maximisation |
+| Carbon price shock | Sudden carbon price spike (e.g., ETS auction, policy change) | Coal becomes uneconomic mid-dispatch, forced merit-order re-ranking | Re-dispatch to gas/biomass, activate storage, curtail coal, adjust market clearing |
+| Wind drought (Dunkelflaute) | Sustained high-pressure weather system | Days of low wind + solar output | Storage depletion, fossil ramp-up (gas, coal, biomass), imports, demand curtailment |
 | Solar eclipse/extreme cloud | Rapid solar generation drop | Fast frequency transient | BESS fast response, gas peakers, demand reduction |
 | Transmission line failure | Storm, equipment failure | Congestion, islanding risk, price separation between zones | Redispatch, topology switching, BESS at constrained nodes |
 | Cyber attack on SCADA | Malicious actor | Loss of observability, uncontrolled switching | Manual overrides, islanding, physical switching |
@@ -220,10 +225,11 @@ The problem-solver agent needs a defined set of actions it can take. Based on re
 
 ### 6.1 Supply-Side Actions
 - Activate spinning reserve
-- Ramp dispatchable generation (gas, hydro)
+- Ramp dispatchable generation (gas, coal, biomass, hydro)
 - Dispatch BESS (charge/discharge)
 - Activate pumped hydro
 - Request emergency interconnector flows
+- Recall mothballed coal/gas plant (longer lead time)
 - Curtail renewable generation (last resort)
 - Black-start sequence (post-blackout)
 
