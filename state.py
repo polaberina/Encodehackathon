@@ -17,6 +17,7 @@ class AgentState(TypedDict):
     skip_planning: bool 
     comm_response_actions: List[dict] 
     comm_needs_planning:bool 
+    memory_context: str
 
 def make_initial_state(zone_id: str) -> AgentState:
     """
@@ -39,4 +40,5 @@ def make_initial_state(zone_id: str) -> AgentState:
         skip_planning=False,
         comm_response_actions=[],
         comm_needs_planning=False,
+        memory_context="",
     )

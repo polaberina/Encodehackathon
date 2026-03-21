@@ -58,10 +58,6 @@ logging.basicConfig(
 )
  
  
-# ─────────────────────────────────────────────────────────────────────────────
-# ZONE FACTORIES  (identical to run_demo.py)
-# ─────────────────────────────────────────────────────────────────────────────
- 
 def make_zone_alpha() -> Zone:
     """Solar + wind zone in the north. High variability, exports to Gamma."""
     return Zone(
@@ -150,7 +146,7 @@ def make_routes():
     ]
  
  
-
+ 
 # ─────────────────────────────────────────────────────────────────────────────
 # GOVERNOR HOOK FACTORY
 # ─────────────────────────────────────────────────────────────────────────────
@@ -269,7 +265,7 @@ def main():
     # ── Wire governor hook into engine ────────────────────────────────────
     timing_log            = []
     engine.governor_hook  = make_governor_hook(zone_graphs, timing_log, ai_zone_ids)
-
+ 
     # ── Wire adversarial Crisis Agent into engine ───────────────────────────
     if not getattr(args, 'no_adversary', False):
         print(f'\n  Building adversarial Crisis Agent (model={args.model})')
@@ -278,7 +274,7 @@ def main():
         print('  Crisis Agent compiled and wired into engine.crisis_hook.')
     else:
         print('\n  Adversarial Crisis Agent DISABLED (--no-adversary).')
-
+ 
     # ── Print initial world state ─────────────────────────────────────────
     print("\n  Initial state:")
     engine.print_status()
@@ -288,7 +284,7 @@ def main():
     print(f"  Starting {args.ticks}-tick simulation with AI governors...")
     print(f"{'═' * 80}\n")
  
-    for _ in range(args.ticks):
+    for tick_num in range(args.ticks):
         # Engine.tick() handles the full physics step, then calls governor_hook
         # for each zone (which runs the LangGraph pipeline), then crisis_hook.
         engine.tick()
@@ -306,7 +302,7 @@ def main():
             print(f"  LOG: {msg}")
         if tick_logs:
             print()
-
+ 
         # Collapse check: exit early if any zone runs out of energy
         collapsed = [
             z for z in engine.zones.values()
@@ -318,6 +314,25 @@ def main():
             print(f"  GAME OVER -- Zone(s) COLLAPSED: {names}")
             print(f"{'=' * 80}\n")
             break
+ 
+        # ── Pause for user confirmation before the next tick ──────────────
+        ticks_remaining = args.ticks - tick_num - 1
+        if ticks_remaining > 0:
+            print(f"\n{'─' * 80}")
+            print(f"  ✋  Tick {engine.tick_number} complete. "
+                  f"{ticks_remaining} tick(s) remaining.")
+            print(f"  Press ENTER to advance to Tick {engine.tick_number + 1}"
+                  f", or type 'q' + ENTER to quit early.")
+            print(f"{'─' * 80}")
+            try:
+                user_input = input("  > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Simulation interrupted by user.")
+                break
+            if user_input in ("q", "quit", "exit"):
+                print("\n  User quit early. Ending simulation.")
+                break
+            print()
  
     # ── Timing summary ────────────────────────────────────────────────────
     if timing_log:

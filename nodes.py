@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from models import EnergyType
  
 from state import AgentState
+from memory import ZoneMemory
  
 logger = logging.getLogger(__name__)
  
@@ -133,6 +134,8 @@ class ZoneAgentNodes:
             max_tokens=2048,
             temperature=0.2,
         )
+
+        self.memory = ZoneMemory(zone_id=zone_id)
  
     # ─────────────────────────────────────────────────────────────────────────
     # 1. SUPERVISOR GATE  (deterministic — no LLM)
@@ -171,6 +174,10 @@ class ZoneAgentNodes:
             and len(active_crises) == 0
             and len(pending) <= 2       # Small pending queue is fine
         )
+
+        memory_context = self.memory.load_context(n=5)
+        memory_flag    = "✓ memory loaded" if memory_context else "○ no memory"
+ 
  
         print(
             f"\n[SUPERVISOR | Zone {self.zone_id.upper()} | Tick {self.engine.tick_number}]"
@@ -199,6 +206,7 @@ class ZoneAgentNodes:
             "tick_report":           "",
             "comm_response_actions": [],
             "comm_needs_planning":   False,
+            "memory_context": memory_context,
         }
  
     def route_supervisor_gate(self, state: AgentState) -> str:
@@ -252,6 +260,13 @@ class ZoneAgentNodes:
                 f"\n\nCOMMUNICATION AGENT PRE-PROPOSED RESPONSES (incorporate into plan):\n"
                 + json.dumps(state["comm_response_actions"], indent=2)
             )
+
+        memory_section = ""
+        if state.get("memory_context"):
+            memory_section = (
+                f"\n\nAGENT HISTORICAL MEMORY (use to spot patterns & avoid past mistakes):\n"
+                f"{state['memory_context']}\n"
+            )
  
         messages = [
             SystemMessage(content=(
@@ -263,7 +278,8 @@ class ZoneAgentNodes:
             HumanMessage(content=(
                 f"Analyze this zone state snapshot for Tick {state['tick_number']}:\n\n"
                 f"{json.dumps(zone_state, indent=2)}"
-                f"{comm_context}\n\n"
+                f"{comm_context}"
+                f"{memory_section}\n\n"
                 "Produce a Situation Report with EXACTLY these sections:\n\n"
                 "RESOURCE STATUS\n"
                 "  • Stored energy (absolute + % of capacity)\n"
