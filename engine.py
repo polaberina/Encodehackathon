@@ -1,13 +1,13 @@
 """
 engine.py — The Simulation Engine.
- 
+
 This is the "physics" of the world. It owns the authoritative state of all
 zones, routes, and crises, and advances time via tick().
- 
+
 Key design principle: The engine is the single source of truth. Agents
 never modify zone state directly — they call engine action methods, which
 validate, check budget, deduct cost, and apply changes atomically.
- 
+
 Tick execution order (v3):
   0.  Advance season calendar.
   1.  Fire any scheduled crises (and send early warnings 2 ticks ahead).
@@ -26,43 +26,43 @@ Tick execution order (v3):
   14. Governor Agents observe and act.      <- Phase 2 hook
   15. Crisis Agent evaluates and injects.   <- Phase 2 hook
   16. Active crises ticked down / expired.
- 
+
 New in v3:
   Seasonal mechanics:
     SEASONAL_SOURCE_MODIFIERS maps (EnergyType, Season) -> multiplier.
     SEASONAL_DEMAND_MODIFIERS maps Season -> demand multiplier.
     Applied every tick by _step_advance_season().
- 
+
   Source aging:
     Sources degrade slowly over time (degradation_modifier decreases every
     5 ticks). Invest in efficiency to permanently raise output rates.
- 
+
   Morale and reputation:
     Tracked per zone. Both affect income and demand. Morale degradation
     compounds under consecutive Critical ticks.
- 
+
   Partial observability:
     get_zone_state(zone_id, observer_zone_id) returns full, partial, or
     minimal info depending on whether the observer has a trade route or
     has spent budget on action_monitor_zone().
- 
+
   Scheduled crises with early warnings:
     schedule_crisis() queues a crisis to fire at a specific tick and
     automatically sends a noisy warning signal 2 ticks before.
- 
+
   New actions:
     fortify_route, sell_surplus, build_new_route, invest_in_efficiency,
     set_export_cap, deploy_emergency_generator, request_aid,
     issue_conservation_order, settle_worker_strike, repair_source,
     monitor_zone.
- 
+
   New crises handled:
     DROUGHT, HEAT_WAVE, WILDFIRE, EQUIPMENT_FAILURE, STORAGE_LEAK,
     ECONOMIC_RECESSION, WORKER_STRIKE, POLITICAL_EMBARGO, CYBER_ATTACK,
     TRANSMISSION_SURGE, REGIONAL_BLACKOUT, CASCADING_FAILURE (now fully
     implemented with neighbour spread).
 """
- 
+
 import uuid
 import random
 import logging
@@ -71,10 +71,16 @@ from models import (
     Zone, EnergySource, TradeRoute, CrisisEvent, TradeOffer, Storage, Economy,
     StabilityState, EnergyType, CrisisType, Season
 )
- 
+
 logger = logging.getLogger(__name__)
- 
+
+
+# ─────────────────────────────────────────────────────────────
+# ACTION COSTS
+# ─────────────────────────────────────────────────────────────
+
 ACTION_COSTS: dict = {
+    # ── Original actions ──────────────────────────────────────
     "ration_energy":              10.0,
     "boost_source":               50.0,
     "repair_route":               30.0,
@@ -82,6 +88,7 @@ ACTION_COSTS: dict = {
     "close_trade_route":           5.0,
     "emergency_broadcast":         0.0,
     "upgrade_storage":           100.0,
+    # ── New actions ───────────────────────────────────────────
     "fortify_route":              40.0,   # Harden a route against attack damage
     "sell_surplus":                0.0,   # Free; energy -> credits conversion
     "build_new_route":           150.0,   # Expensive; route ready after delay
@@ -93,16 +100,26 @@ ACTION_COSTS: dict = {
     "settle_worker_strike":       60.0,   # Resolve WORKER_STRIKE crisis
     "repair_source":              35.0,   # Restore EQUIPMENT_FAILURE offline source
     "monitor_zone":               20.0,   # Full observability of a zone for N ticks
+    # ── Trade offer actions ───────────────────────────────────
     "propose_trade":               5.0,   # Small admin cost to draft an offer
     "accept_trade":                0.0,   # Acceptance is free; value is in the deal
     "reject_trade":                0.0,   # Rejection is free
 }
 
+# ─────────────────────────────────────────────────────────────
+# ACTION LATENCY (in ticks)
+# Budget is deducted immediately when an action is queued.
+# The actual state change takes effect after this many ticks.
+# 0 = immediate (applied in the same tick, no queue entry created).
+# ─────────────────────────────────────────────────────────────
+
 ACTION_LATENCY: dict = {
+    # Immediate — communication or admin policy (no physical work needed)
     "sell_surplus":               0,
     "emergency_broadcast":        0,
     "monitor_zone":               0,
     "set_export_cap":             0,
+    # Fast (1 tick) — quick decisions with modest ramp-up time
     "ration_energy":              1,
     "close_trade_route":          1,
     "boost_source":               1,
@@ -110,64 +127,73 @@ ACTION_LATENCY: dict = {
     "issue_conservation_order":   1,
     "settle_worker_strike":       1,
     "request_aid":                1,
+    # Moderate (2 ticks) — crew mobilization or engineering work
     "repair_route":               2,
     "fortify_route":              2,
     "repair_source":              2,
     "invest_in_efficiency":       2,
     "open_trade_route":           2,
+    # Slow (3 ticks) — major infrastructure construction
     "upgrade_storage":            3,
+    # Trade offers: propose is instant (message delivery); accept has 1-tick settlement
     "propose_trade":              0,
     "accept_trade":               1,
     "reject_trade":               0,
 }
 
+# ─────────────────────────────────────────────────────────────
+# SEASONAL MULTIPLIERS
+# ─────────────────────────────────────────────────────────────
+
 SEASON_ORDER = [Season.SPRING, Season.SUMMER, Season.AUTUMN, Season.WINTER]
- 
+
+# Per (EnergyType, Season) output multiplier applied to seasonal_modifier.
 SEASONAL_SOURCE_MODIFIERS: dict = {
     EnergyType.SOLAR: {
         Season.SPRING: 0.90,
-        Season.SUMMER: 1.30,    
+        Season.SUMMER: 1.30,    # Long days, strong sun
         Season.AUTUMN: 0.70,
-        Season.WINTER: 0.40,    
+        Season.WINTER: 0.40,    # Short days, low angle
     },
     EnergyType.HYDRO: {
-        Season.SPRING: 1.30,    
-        Season.SUMMER: 0.85,    
+        Season.SPRING: 1.30,    # Snowmelt runoff
+        Season.SUMMER: 0.85,    # Lower water levels
         Season.AUTUMN: 0.90,
-        Season.WINTER: 0.60,    
+        Season.WINTER: 0.60,    # Ice / low flow
     },
     EnergyType.WIND: {
         Season.SPRING: 1.10,
-        Season.SUMMER: 0.80,    
+        Season.SUMMER: 0.80,    # Calmer summers
         Season.AUTUMN: 1.15,
-        Season.WINTER: 1.30,    
+        Season.WINTER: 1.30,    # Stronger winter winds
     },
     EnergyType.FOSSIL: {
         Season.SPRING: 1.00,
         Season.SUMMER: 1.00,
         Season.AUTUMN: 1.00,
-        Season.WINTER: 1.00,    
+        Season.WINTER: 1.00,    # Fossil unaffected by weather
     },
     EnergyType.NUCLEAR: {
         Season.SPRING: 1.00,
-        Season.SUMMER: 0.95,    
+        Season.SUMMER: 0.95,    # Slight cooling efficiency drop in heat
         Season.AUTUMN: 1.00,
         Season.WINTER: 1.00,
     },
 }
- 
+
+# Per-season demand multiplier applied to seasonal_demand_modifier.
 SEASONAL_DEMAND_MODIFIERS: dict = {
     Season.SPRING: 0.90,
     Season.SUMMER: 1.00,
     Season.AUTUMN: 0.95,
-    Season.WINTER: 1.30,    
+    Season.WINTER: 1.30,    # Heating demand spike
 }
- 
- 
+
+
 class SimulationEngine:
     """
     The central engine that owns and advances all simulation state.
- 
+
     Usage:
         engine = SimulationEngine(seed=42)
         engine.add_zone(zone_a)
@@ -176,38 +202,52 @@ class SimulationEngine:
         engine.schedule_crisis(crisis_event, fire_at_tick=5)
         engine.tick()
     """
- 
+
     def __init__(self, seed: Optional[int] = None):
         self.zones: dict = {}
         self.trade_routes: dict = {}
         self.crisis_events: list = []
         self.tick_number: int = 0
- 
+
         self.rng = random.Random(seed)
- 
+
+        # Phase 2 hooks
         self.governor_hook: Optional[Callable] = None
         self.crisis_hook: Optional[Callable] = None
- 
+
+        # Event log
         self.event_log: list = []
- 
+
+        # ── Seasonal state ────────────────────────────────────────────────
         self.season: Season = Season.SPRING
         self._season_tick: int = 0
         self.ticks_per_season: int = 8      # Each season lasts 8 ticks by default
- 
+
+        # ── New v3 state ──────────────────────────────────────────────────
         self.embargoed_routes: set = set()  # Route IDs blocked by POLITICAL_EMBARGO
         self._pending_routes: list = []     # Under-construction routes (build_new_route)
         self._temp_sources: dict = {}       # gen_id -> ticks_remaining (emergency gens)
         self._monitored_zones: dict = {}    # {observer_id: {target_id: ticks_remaining}}
         self._scheduled_crises: list = []   # [{crisis, fire_tick, warning_sent, ...}]
- 
+
+        # ── Action latency queue ──────────────────────────────────────────
+        # Actions with latency > 0 are stored here and applied when
+        # apply_at_tick <= tick_number at the start of each tick.
+        # Format: {action_id, action_type, zone_name, apply_at_tick, params}
         self._pending_actions: list = []
 
+        # ── Trade offer system ────────────────────────────────────────────
+        # Keyed by offer_id. Offers sit here until accepted, rejected, or expired.
         self._pending_trade_offers: dict = {}   # offer_id -> TradeOffer
- 
+
+    # ──────────────────────────────────────────
+    # SETUP METHODS
+    # ──────────────────────────────────────────
+
     def add_zone(self, zone: Zone):
         self.zones[zone.zone_id] = zone
         logger.info(f"Zone added: {zone.name} ({zone.zone_id})")
- 
+
     def add_trade_route(self, route: TradeRoute):
         assert route.source_zone_id in self.zones, \
             f"Source zone '{route.source_zone_id}' not registered"
@@ -220,12 +260,12 @@ class SimulationEngine:
             f"| received: {route.effective_received_rate:.1f}/tick "
             f"| heat loss: {route.heat_loss_rate:.1f}/tick"
         )
- 
+
     def inject_crisis(self, crisis: CrisisEvent):
         """Inject a crisis immediately (fires this tick)."""
         self.crisis_events.append(crisis)
         self._log(f"CRISIS: [{crisis.crisis_type.value}] -> {crisis.target_id} -- {crisis.description}")
- 
+
     def schedule_crisis(
         self,
         crisis: CrisisEvent,
@@ -235,7 +275,7 @@ class SimulationEngine:
     ):
         """
         Queue a crisis to fire at a specific tick.
- 
+
         If send_warning=True, an early warning signal is delivered 2 ticks
         before the crisis fires. The probability is intentionally noisy —
         sometimes warnings are false alarms (set warning_probability < 1.0).
@@ -247,12 +287,16 @@ class SimulationEngine:
             "send_warning": send_warning,
             "warning_probability": warning_probability,
         })
- 
+
+    # ──────────────────────────────────────────
+    # MAIN TICK
+    # ──────────────────────────────────────────
+
     def tick(self):
         """Advance the simulation by one time step."""
         self.tick_number += 1
         self._log(f"=== Tick {self.tick_number} | Season: {self.season.value.upper()} ===")
- 
+
         self._step_apply_pending_actions()      # Step 0:  Apply matured deferred actions
         self._step_advance_season()             # Step 1:  Season calendar + modifiers
         self._step_scheduled_crises()           # Step 2:  Fire/warn scheduled crises
@@ -268,27 +312,31 @@ class SimulationEngine:
         self._step_monitoring_decay()           # Step 12: Tick monitoring subscriptions
         self._step_pending_routes()             # Step 13: Advance under-construction routes
         self._step_recalculate_stability()      # Step 14: Recompute stability
- 
+
         # Step 15: Governor Agent hook (Phase 2)
         if self.governor_hook:
             for zone in self.zones.values():
                 if zone.stability_state != StabilityState.COLLAPSED:
                     self.governor_hook(self, zone)
- 
+
         # Step 16: Crisis Agent hook (Phase 2)
         if self.crisis_hook:
             self.crisis_hook(self)
- 
+
         # Step 17: Expire finished crises
         self._step_expire_crises()
- 
+
         # Step 18: Expire stale trade offers
         self._step_expire_trade_offers()
- 
+
+    # ──────────────────────────────────────────
+    # TICK STEPS (private)
+    # ──────────────────────────────────────────
+
     def _step_apply_pending_actions(self):
         """
         Step 0: Apply any deferred actions whose apply_at_tick has arrived.
- 
+
         Actions are sorted by apply_at_tick so earlier-queued actions execute
         first within the same tick.  If the target zone or resource no longer
         exists (e.g. zone collapsed, source removed) the action is skipped with
@@ -305,14 +353,14 @@ class SimulationEngine:
         ready.sort(key=lambda x: x["apply_at_tick"])
         for item in ready:
             self._apply_pending_action(item)
- 
+
     def _apply_pending_action(self, item: dict):
         """Dispatch and execute a single matured pending action."""
         atype = item["action_type"]
         p     = item["params"]
         zname = item.get("zone_name", "?")
         self._log(f"  [Latency] Applying deferred '{atype}' for {zname}")
- 
+
         if atype == "ration_energy":
             zone = self.zones.get(p["zone_id"])
             if zone and zone.stability_state != StabilityState.COLLAPSED:
@@ -321,7 +369,7 @@ class SimulationEngine:
                     f"  [Action] {zone.name}: energy rationed "
                     f"(demand modifier -> {zone.demand_modifier:.2f})"
                 )
- 
+
         elif atype == "boost_source":
             zone = self.zones.get(p["zone_id"])
             if zone:
@@ -333,7 +381,7 @@ class SimulationEngine:
                             f"(modifier -> {source.output_modifier:.1f}x)"
                         )
                         break
- 
+
         elif atype == "repair_route":
             route = self.trade_routes.get(p["route_id"])
             if route:
@@ -344,7 +392,7 @@ class SimulationEngine:
                 )
             else:
                 self._log(f"  [Latency] repair_route: route {p['route_id']} no longer exists")
- 
+
         elif atype == "open_trade_route":
             route = p["route"]
             if route.source_zone_id in self.zones and route.target_zone_id in self.zones:
@@ -356,14 +404,14 @@ class SimulationEngine:
                 )
             else:
                 self._log(f"  [Latency] open_trade_route: zone(s) no longer exist")
- 
+
         elif atype == "close_trade_route":
             if p["route_id"] in self.trade_routes:
                 del self.trade_routes[p["route_id"]]
                 self._log(f"  [Action] Route {p['route_id']} closed by {zname}")
             else:
                 self._log(f"  [Latency] close_trade_route: route {p['route_id']} already gone")
- 
+
         elif atype == "upgrade_storage":
             zone = self.zones.get(p["zone_id"])
             if zone:
@@ -372,7 +420,7 @@ class SimulationEngine:
                     f"  [Action] {zone.name}: storage upgraded "
                     f"+{p['additional_capacity']:.0f} -> new capacity {zone.storage.capacity:.0f}"
                 )
- 
+
         elif atype == "fortify_route":
             route = self.trade_routes.get(p["route_id"])
             if route:
@@ -385,7 +433,7 @@ class SimulationEngine:
                 )
             else:
                 self._log(f"  [Latency] fortify_route: route {p['route_id']} no longer exists")
- 
+
         elif atype == "deploy_emergency_generator":
             zone = self.zones.get(p["zone_id"])
             if zone and zone.stability_state != StabilityState.COLLAPSED:
@@ -407,7 +455,7 @@ class SimulationEngine:
                 )
             else:
                 self._log(f"  [Latency] deploy_emergency_generator: zone unavailable")
- 
+
         elif atype == "issue_conservation_order":
             zone = self.zones.get(p["zone_id"])
             if zone and zone.stability_state != StabilityState.COLLAPSED:
@@ -419,7 +467,7 @@ class SimulationEngine:
                     f"(demand modifier -> {zone.demand_modifier:.2f}, "
                     f"morale -{morale_cost:.1f} -> {zone.morale:.1f})"
                 )
- 
+
         elif atype == "settle_worker_strike":
             zone = self.zones.get(p["zone_id"])
             if zone:
@@ -443,7 +491,7 @@ class SimulationEngine:
                         f"  [Latency] settle_worker_strike: no active strike on "
                         f"{source_id} (may have resolved on its own)"
                     )
- 
+
         elif atype == "repair_source":
             zone = self.zones.get(p["zone_id"])
             if zone:
@@ -460,7 +508,7 @@ class SimulationEngine:
                     self._log(
                         f"  [Latency] repair_source: {source_id} already active or not found"
                     )
- 
+
         elif atype == "invest_in_efficiency":
             zone = self.zones.get(p["zone_id"])
             if zone:
@@ -480,7 +528,7 @@ class SimulationEngine:
                             f"| degradation restored to {source.degradation_modifier:.3f}x"
                         )
                         break
- 
+
         elif atype == "request_aid":
             donor     = self.zones.get(p["donor_zone_id"])
             requester = self.zones.get(p["requesting_zone_id"])
@@ -499,10 +547,10 @@ class SimulationEngine:
                         f"  [Aid] {donor.name}: no energy available for aid to "
                         f"{requester.name} (situation changed)"
                     )
- 
+
         elif atype == "accept_trade":
             self._execute_accepted_trade(p["offer_id"])
- 
+
     def _queue_action(
         self, action_type: str, zone_name: str, params: dict, latency: int
     ):
@@ -521,7 +569,7 @@ class SimulationEngine:
             f"  [Queue] '{action_type}' for {zone_name} "
             f"-- effect in {latency} tick(s) (at tick {self.tick_number + latency})"
         )
- 
+
     def _step_expire_trade_offers(self):
         """
         Step 18: Expire trade offers whose deadline has passed.
@@ -547,11 +595,11 @@ class SimulationEngine:
                             ),
                             "tick": self.tick_number,
                         })
- 
+
     def _step_advance_season(self):
         """
         Step 0: Advance the season calendar and apply seasonal multipliers.
- 
+
         Called first so that all source.seasonal_modifier and
         zone.seasonal_demand_modifier values are correct before production
         and demand are computed this tick.
@@ -563,7 +611,7 @@ class SimulationEngine:
             old_season = self.season
             self.season = SEASON_ORDER[(idx + 1) % 4]
             self._log(f"  [Season] {old_season.value.upper()} -> {self.season.value.upper()}")
- 
+
         # Apply to all zones and sources
         demand_mult = SEASONAL_DEMAND_MODIFIERS[self.season]
         for zone in self.zones.values():
@@ -572,7 +620,7 @@ class SimulationEngine:
                 source.seasonal_modifier = SEASONAL_SOURCE_MODIFIERS.get(
                     source.energy_type, {}
                 ).get(self.season, 1.0)
- 
+
     def _step_scheduled_crises(self):
         """
         Step 1: Fire scheduled crises at their designated tick.
@@ -582,7 +630,7 @@ class SimulationEngine:
         for item in self._scheduled_crises:
             fire_tick = item["fire_tick"]
             crisis = item["crisis"]
- 
+
             # Send warning 2 ticks before
             if item["send_warning"] and not item["warning_sent"]:
                 if self.tick_number == fire_tick - 2:
@@ -606,43 +654,47 @@ class SimulationEngine:
                             f"  [Warning] Early warning -> {zone.name}: "
                             f"{crisis.crisis_type.value} ({prob*100:.0f}% confidence)"
                         )
- 
+
             # Fire the crisis
             if self.tick_number >= fire_tick:
                 self.inject_crisis(crisis)
             else:
                 still_pending.append(item)
- 
+
         self._scheduled_crises = still_pending
- 
+
     def _apply_active_crises(self):
         """
         Step 2: Apply the ongoing effects of each active crisis.
- 
+
         Runs before production so modifiers are in place.
         One-time setup (e.g. storing originals for restore) is guarded by
         _initialized / _originals keys in crisis.parameters.
         """
         for crisis in self.crisis_events:
-            ctype = crisis.crisis_type 
+            ctype = crisis.crisis_type
+
+            # ── Original crisis types ─────────────────────────────────────
+
             if ctype == CrisisType.SUPPLY_DISRUPTION:
                 zone = self.zones.get(crisis.target_id)
                 if zone:
                     source_id = crisis.parameters.get("source_id")
-                    modifier = crisis.parameters.get("output_modifier", 0.5)
+                    modifier = crisis.parameters.get("output_modifier", 0.20)
                     for source in zone.sources:
                         if source.source_id == source_id:
                             source.output_modifier = modifier
- 
+
             elif ctype == CrisisType.DEMAND_SPIKE:
                 zone = self.zones.get(crisis.target_id)
                 if zone:
-                    zone.demand_modifier = crisis.parameters.get("demand_modifier", 1.5)
- 
+                    zone.demand_modifier = crisis.parameters.get("demand_modifier", 2.0)
+
             elif ctype == CrisisType.ROUTE_ATTACK:
                 route = self.trade_routes.get(crisis.target_id)
                 if route:
-                    damage = crisis.parameters.get("damage_per_tick", 10.0)
+                    damage = crisis.parameters.get("damage_per_tick", 20.0)
+                    # Fortification reduces damage
                     effective_damage = damage * (1.0 - route.fortification)
                     route.route_health = max(0.0, route.route_health - effective_damage)
                     if route.is_severed:
@@ -650,17 +702,18 @@ class SimulationEngine:
                             f"  [Route] {route.route_id} severed "
                             f"({route.source_zone_id}->{route.target_zone_id})"
                         )
- 
+
             elif ctype == CrisisType.CASCADING_FAILURE:
                 zone = self.zones.get(crisis.target_id)
                 if zone:
-                    modifier = crisis.parameters.get("output_modifier", 0.3)
+                    modifier = crisis.parameters.get("output_modifier", 0.10)
                     for source in zone.sources:
                         source.output_modifier = min(source.output_modifier, modifier)
+                    # Spread to neighbours once (on first application)
                     if (crisis.parameters.get("spreading", True)
                             and not crisis.parameters.get("_spread_applied")):
                         crisis.parameters["_spread_applied"] = True
-                        spread_modifier = crisis.parameters.get("spread_modifier", 0.7)
+                        spread_modifier = crisis.parameters.get("spread_modifier", 0.40)
                         neighbors = self._get_neighbor_ids(crisis.target_id)
                         for nid in neighbors:
                             neighbor = self.zones.get(nid)
@@ -672,40 +725,44 @@ class SimulationEngine:
                                 self._log(
                                     f"  [Cascade] Failure spread to {neighbor.name} "
                                     f"(output capped at {spread_modifier:.1f}x)"
-                                ) 
+                                )
+
+            # ── Physical / environmental ──────────────────────────────────
+
             elif ctype == CrisisType.DROUGHT:
                 zone = self.zones.get(crisis.target_id)
                 if zone:
-                    modifier = crisis.parameters.get("output_modifier", 0.20)
+                    modifier = crisis.parameters.get("output_modifier", 0.05)
                     for source in zone.sources:
                         if source.energy_type == EnergyType.HYDRO:
                             source.output_modifier = modifier
- 
+
             elif ctype == CrisisType.HEAT_WAVE:
                 zone = self.zones.get(crisis.target_id)
                 if zone:
-                    zone.demand_modifier = crisis.parameters.get("demand_modifier", 1.40)
-                    solar_mod = crisis.parameters.get("solar_output_modifier", 0.70)
+                    zone.demand_modifier = crisis.parameters.get("demand_modifier", 1.80)
+                    solar_mod = crisis.parameters.get("solar_output_modifier", 0.30)
                     for source in zone.sources:
                         if source.energy_type == EnergyType.SOLAR:
                             source.output_modifier = solar_mod
- 
+
             elif ctype == CrisisType.WILDFIRE:
                 zone = self.zones.get(crisis.target_id)
                 if zone:
                     source_id = crisis.parameters.get("source_id")
-                    src_mod = crisis.parameters.get("output_modifier", 0.10)
+                    src_mod = crisis.parameters.get("output_modifier", 0.05)
                     for source in zone.sources:
                         if source.source_id == source_id:
                             source.output_modifier = src_mod
+                # Also damage the associated route each tick
                 route_id = crisis.parameters.get("route_id")
                 if route_id:
                     route = self.trade_routes.get(route_id)
                     if route:
-                        dmg = crisis.parameters.get("route_damage_per_tick", 20.0)
+                        dmg = crisis.parameters.get("route_damage_per_tick", 30.0)
                         effective_dmg = dmg * (1.0 - route.fortification)
                         route.route_health = max(0.0, route.route_health - effective_dmg)
- 
+
             elif ctype == CrisisType.EQUIPMENT_FAILURE:
                 zone = self.zones.get(crisis.target_id)
                 if zone and not crisis.parameters.get("_initialized"):
@@ -718,10 +775,12 @@ class SimulationEngine:
                                 f"  [Equipment] {zone.name}/{source_id}: "
                                 f"equipment failure -- source offline"
                             )
- 
+
             elif ctype == CrisisType.STORAGE_LEAK:
                 pass    # Handled separately in _step_storage_leak()
-  
+
+            # ── Economic / political ──────────────────────────────────────
+
             elif ctype == CrisisType.ECONOMIC_RECESSION:
                 zone = self.zones.get(crisis.target_id)
                 if zone:
@@ -730,18 +789,18 @@ class SimulationEngine:
                             zone.economy.income_modifier
                         )
                     zone.economy.income_modifier = crisis.parameters.get(
-                        "income_modifier", 0.50
+                        "income_modifier", 0.15
                     )
- 
+
             elif ctype == CrisisType.WORKER_STRIKE:
                 zone = self.zones.get(crisis.target_id)
                 if zone:
                     source_id = crisis.parameters.get("source_id")
-                    modifier = crisis.parameters.get("output_modifier", 0.25)
+                    modifier = crisis.parameters.get("output_modifier", 0.10)
                     for source in zone.sources:
                         if source.source_id == source_id:
                             source.output_modifier = modifier
- 
+
             elif ctype == CrisisType.POLITICAL_EMBARGO:
                 route_id = crisis.parameters.get("route_id", crisis.target_id)
                 self.embargoed_routes.add(route_id)
@@ -751,7 +810,9 @@ class SimulationEngine:
                         f"  [Embargo] Route {route_id} frozen "
                         f"({crisis.remaining_ticks} ticks remaining)"
                     )
-  
+
+            # ── Technical / systemic ──────────────────────────────────────
+
             elif ctype == CrisisType.CYBER_ATTACK:
                 zone = self.zones.get(crisis.target_id)
                 if zone:
@@ -762,11 +823,12 @@ class SimulationEngine:
                             f"  [Cyber] {zone.name}: systems compromised -- "
                             f"observations corrupted for {crisis.remaining_ticks} ticks"
                         )
- 
+
             elif ctype == CrisisType.TRANSMISSION_SURGE:
                 if "_originals" not in crisis.parameters:
+                    # First application: store originals and apply reduction
                     originals = {}
-                    reduction = crisis.parameters.get("efficiency_reduction", 0.35)
+                    reduction = crisis.parameters.get("efficiency_reduction", 0.60)
                     for route in self.trade_routes.values():
                         if (route.source_zone_id == crisis.target_id
                                 or route.target_zone_id == crisis.target_id):
@@ -779,10 +841,10 @@ class SimulationEngine:
                         f"  [Surge] Transmission surge on {crisis.target_id}: "
                         f"{reduction*100:.0f}% efficiency loss on {len(originals)} routes"
                     )
- 
+
             elif ctype == CrisisType.REGIONAL_BLACKOUT:
                 region = crisis.parameters.get("region", crisis.target_id)
-                demand_mod = crisis.parameters.get("demand_modifier", 1.80)
+                demand_mod = crisis.parameters.get("demand_modifier", 2.50)
                 for zone in self.zones.values():
                     if zone.region == region:
                         zone.demand_modifier = demand_mod
@@ -793,7 +855,7 @@ class SimulationEngine:
                         f"  [Regional] Blackout across region '{region}': "
                         f"{', '.join(affected)} hit with {demand_mod:.1f}x demand"
                     )
- 
+
     def _step_sample_outputs(self):
         """Step 3: Roll random output for every active energy source."""
         for zone in self.zones.values():
@@ -811,7 +873,7 @@ class SimulationEngine:
                             f"output {direction} {sampled:.1f} "
                             f"(expected ~{expected:.1f}, {deviation_pct:.0f}% off)"
                         )
- 
+
     def _step_energy_production(self):
         """Step 4: Each zone's active sources deposit energy into Storage."""
         for zone in self.zones.values():
@@ -825,11 +887,11 @@ class SimulationEngine:
                     f"  [Spill] {zone.name}: spilled {spilled:.1f} units "
                     f"(storage at capacity {zone.storage.capacity:.0f})"
                 )
- 
+
     def _step_economy(self):
         """
         Step 5: Each zone earns budget.
- 
+
         Income = budget_per_tick x income_modifier (recession) x morale_factor.
         Morale below 50 reduces income: tax base shrinks, productivity drops.
         """
@@ -843,11 +905,11 @@ class SimulationEngine:
                 * morale_factor
             )
             zone.economy.earn(effective_income)
- 
+
     def _step_trade_transfer(self):
         """
         Step 6: Trade routes move energy from source to target.
- 
+
         Respects:
           - export_cap: source cannot send more than the cap per tick
           - embargoed_routes: skipped entirely during embargo
@@ -863,22 +925,23 @@ class SimulationEngine:
                     f"({route.source_zone_id}->{route.target_zone_id})"
                 )
                 continue
- 
+
             source = self.zones.get(route.source_zone_id)
             target = self.zones.get(route.target_zone_id)
             if not source or not target:
                 continue
             if source.stability_state == StabilityState.COLLAPSED:
                 continue
- 
+
             to_send = min(route.effective_transfer_rate, source.storage.stored_energy)
             if to_send <= 0:
+                # Source delivered nothing this tick -> reputation penalty
                 source.reputation = max(0.0, source.reputation - 1.5)
                 continue
- 
+
             source.storage.withdraw(to_send)
             route.in_flight.append([to_send, route.latency])
- 
+
             still_flying = []
             total_sent = 0.0
             total_received = 0.0
@@ -893,7 +956,7 @@ class SimulationEngine:
                 else:
                     still_flying.append([sent_amount, ticks_left])
             route.in_flight = still_flying
- 
+
             if total_received > 0:
                 heat_loss = total_sent - total_received
                 self._log(
@@ -901,7 +964,7 @@ class SimulationEngine:
                     f"sent {total_sent:.1f}, received {total_received:.1f}, "
                     f"loss {heat_loss:.1f} ({(1-route.transmission_efficiency)*100:.0f}%)"
                 )
- 
+
     def _step_demand_consumption(self):
         """Step 7: Each zone consumes energy to meet demand."""
         for zone in self.zones.values():
@@ -915,19 +978,20 @@ class SimulationEngine:
                     f"  [Demand] {zone.name}: shortfall {shortfall:.1f} units "
                     f"(storage drained to zero)"
                 )
- 
+
     def _step_source_aging(self):
         """
         Step 8: Age all sources; apply degradation every 5 ticks.
         Also expire temporary emergency generators.
         """
         expired_gen_ids = []
- 
+
+        # Tick down temporary generators
         for gen_id in list(self._temp_sources.keys()):
             self._temp_sources[gen_id] -= 1
             if self._temp_sources[gen_id] <= 0:
                 expired_gen_ids.append(gen_id)
- 
+
         for gen_id in expired_gen_ids:
             del self._temp_sources[gen_id]
             for zone in self.zones.values():
@@ -939,10 +1003,12 @@ class SimulationEngine:
                             f"decommissioned in {zone.name}"
                         )
                         break
- 
+
+        # Age all remaining sources
         for zone in self.zones.values():
             for source in zone.sources:
                 source.age += 1
+                # Apply degradation every 5 ticks
                 if source.age % 5 == 0:
                     old_deg = source.degradation_modifier
                     source.degradation_modifier = max(
@@ -955,11 +1021,11 @@ class SimulationEngine:
                             f"degradation -> {source.degradation_modifier:.3f}x "
                             f"(age {source.age})"
                         )
- 
+
     def _step_storage_leak(self):
         """
         Step 9: STORAGE_LEAK crises drain stored energy each tick.
- 
+
         Handled as a separate step (not in _apply_active_crises) because
         the leak is a physical drain on storage, not a modifier — it needs
         to happen after production and trade have already deposited energy.
@@ -976,17 +1042,17 @@ class SimulationEngine:
                             f"  [Leak] {zone.name}: storage leaking "
                             f"{leaked:.1f} units ({leak_rate*100:.0f}%/tick)"
                         )
- 
+
     def _step_morale(self):
         """
         Step 10: Update morale and reputation based on stability.
- 
+
         Morale:
           STABLE:    +1.5 per tick (recovery)
           WARNING:   -2.0 per tick
           CRITICAL:  compound penalty: -5 base + 0.5 per consecutive critical tick
           COLLAPSED: -10 per tick
- 
+
         Reputation:
           STABLE:    +0.5 (reliable delivery track record)
           COLLAPSED: -3.0 (counterparties lose confidence)
@@ -1006,7 +1072,7 @@ class SimulationEngine:
             elif state == StabilityState.COLLAPSED:
                 zone.morale = max(0.0, zone.morale - 10.0)
                 zone.reputation = max(0.0, zone.reputation - 3.0)
- 
+
     def _step_monitoring_decay(self):
         """Step 11: Tick down monitoring subscriptions; remove expired ones."""
         for observer_id in list(self._monitored_zones.keys()):
@@ -1019,7 +1085,7 @@ class SimulationEngine:
                     )
             if not self._monitored_zones[observer_id]:
                 del self._monitored_zones[observer_id]
- 
+
     def _step_pending_routes(self):
         """Step 12: Advance under-construction routes; complete when ready."""
         still_pending = []
@@ -1038,7 +1104,7 @@ class SimulationEngine:
             else:
                 still_pending.append(item)
         self._pending_routes = still_pending
- 
+
     def _step_recalculate_stability(self):
         """Step 13: Recompute stability state for every zone."""
         for zone in self.zones.values():
@@ -1054,18 +1120,18 @@ class SimulationEngine:
                 if r.source_zone_id == zone.zone_id and not r.is_severed
                 and r.route_id not in self.embargoed_routes
             )
- 
+
             expected_gain = zone.expected_energy_gain + trade_in
             loss = zone.energy_demand_per_tick + trade_out
             net = expected_gain - loss
- 
+
             zone.net_energy_per_tick = net
- 
+
             if net < 0 and zone.storage.stored_energy > 0:
                 zone.projected_depletion_ticks = zone.storage.stored_energy / abs(net)
             else:
                 zone.projected_depletion_ticks = None
- 
+
             stored = zone.storage.stored_energy
             if stored <= 0:
                 zone.stability_state = StabilityState.COLLAPSED
@@ -1079,7 +1145,7 @@ class SimulationEngine:
                     zone.stability_state = StabilityState.WARNING
             else:
                 zone.stability_state = StabilityState.STABLE
- 
+
     def _step_expire_crises(self):
         """Step 16: Decrement crisis durations, remove and reverse expired ones."""
         still_active = []
@@ -1090,103 +1156,154 @@ class SimulationEngine:
             else:
                 still_active.append(crisis)
         self.crisis_events = still_active
- 
+
     def _expire_crisis(self, crisis: CrisisEvent):
-        """Reverse a crisis that has run its course (where reversible)."""
+        """
+        Reverse a crisis that has run its course (where reversible).
+
+        LINGERING EFFECTS: Crises no longer fully restore to 1.0. Instead,
+        output modifiers recover to 0.85 (a 15% permanent scar), demand
+        modifiers settle at 1.10 (lingering panic), and morale takes a
+        lasting hit. This means long or overlapping crises leave zones
+        permanently weakened — recovery is never free.
+        """
+        LINGERING_OUTPUT_MODIFIER = 0.85      # Sources don't fully recover
+        LINGERING_DEMAND_MODIFIER = 1.10      # Residual panic demand
+        LINGERING_MORALE_PENALTY  = 5.0       # Flat morale loss on crisis end
+        LINGERING_EFFICIENCY_LOSS = 0.05      # Permanent route efficiency scar
+
         self._log(f"  [Expired] Crisis ended: {crisis.description}")
         ctype = crisis.crisis_type
- 
+
+        # ── Reversible: restore with lingering damage ────────────────────
         if ctype == CrisisType.SUPPLY_DISRUPTION:
             zone = self.zones.get(crisis.target_id)
             if zone:
                 source_id = crisis.parameters.get("source_id")
                 for source in zone.sources:
                     if source.source_id == source_id:
-                        source.output_modifier = 1.0
- 
+                        source.output_modifier = LINGERING_OUTPUT_MODIFIER
+                zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY)
+
         elif ctype == CrisisType.DEMAND_SPIKE:
             zone = self.zones.get(crisis.target_id)
             if zone:
-                zone.demand_modifier = 1.0
- 
+                zone.demand_modifier = LINGERING_DEMAND_MODIFIER
+                zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY)
+
         elif ctype == CrisisType.DROUGHT:
             zone = self.zones.get(crisis.target_id)
             if zone:
                 for source in zone.sources:
                     if source.energy_type == EnergyType.HYDRO:
-                        source.output_modifier = 1.0
- 
+                        source.output_modifier = LINGERING_OUTPUT_MODIFIER
+                zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY * 2)
+
         elif ctype == CrisisType.HEAT_WAVE:
             zone = self.zones.get(crisis.target_id)
             if zone:
-                zone.demand_modifier = 1.0
+                zone.demand_modifier = LINGERING_DEMAND_MODIFIER
                 for source in zone.sources:
                     if source.energy_type == EnergyType.SOLAR:
-                        source.output_modifier = 1.0
- 
+                        source.output_modifier = LINGERING_OUTPUT_MODIFIER
+                zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY * 2)
+
         elif ctype == CrisisType.WILDFIRE:
             zone = self.zones.get(crisis.target_id)
             if zone:
                 source_id = crisis.parameters.get("source_id")
                 for source in zone.sources:
                     if source.source_id == source_id:
-                        source.output_modifier = 1.0
- 
+                        # Wildfire leaves severe permanent damage
+                        source.output_modifier = 0.60
+                        source.degradation_modifier = max(
+                            source.efficiency_floor,
+                            source.degradation_modifier - 0.15
+                        )
+                zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY * 3)
+            # Route health is NOT auto-restored — requires action_repair_route
+
         elif ctype == CrisisType.CASCADING_FAILURE:
             zone = self.zones.get(crisis.target_id)
             if zone:
                 for source in zone.sources:
-                    source.output_modifier = 1.0
+                    source.output_modifier = 0.70  # Severe lingering from cascade
+                zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY * 3)
             if crisis.parameters.get("_spread_applied"):
                 for nid in self._get_neighbor_ids(crisis.target_id):
                     neighbor = self.zones.get(nid)
                     if neighbor:
                         for source in neighbor.sources:
-                            source.output_modifier = 1.0
- 
+                            source.output_modifier = LINGERING_OUTPUT_MODIFIER
+                        neighbor.morale = max(0.0, neighbor.morale - LINGERING_MORALE_PENALTY)
+
         elif ctype == CrisisType.WORKER_STRIKE:
             zone = self.zones.get(crisis.target_id)
             if zone:
                 source_id = crisis.parameters.get("source_id")
                 for source in zone.sources:
                     if source.source_id == source_id:
-                        source.output_modifier = 1.0
-                self._log(f"  [Strike] Worker strike resolved in {zone.name}/{source_id}")
- 
+                        source.output_modifier = LINGERING_OUTPUT_MODIFIER
+                zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY * 2)
+                self._log(f"  [Strike] Worker strike resolved in {zone.name}/{source_id} (lingering effects remain)")
+
         elif ctype == CrisisType.POLITICAL_EMBARGO:
             route_id = crisis.parameters.get("route_id", crisis.target_id)
             self.embargoed_routes.discard(route_id)
-            self._log(f"  [Embargo] Route {route_id} unblocked")
- 
+            # Embargo leaves diplomatic damage — reputation hit on both ends
+            route = self.trade_routes.get(route_id)
+            if route:
+                for zid in (route.source_zone_id, route.target_zone_id):
+                    z = self.zones.get(zid)
+                    if z:
+                        z.reputation = max(0.0, z.reputation - 10.0)
+            self._log(f"  [Embargo] Route {route_id} unblocked (reputation scarred)")
+
         elif ctype == CrisisType.CYBER_ATTACK:
             zone = self.zones.get(crisis.target_id)
             if zone:
                 zone.cyber_attacked = False
-                self._log(f"  [Cyber] {zone.name}: systems restored")
- 
+                zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY * 2)
+                self._log(f"  [Cyber] {zone.name}: systems restored (trust damaged)")
+
         elif ctype == CrisisType.TRANSMISSION_SURGE:
             originals = crisis.parameters.get("_originals", {})
             for route_id, orig_eff in originals.items():
                 route = self.trade_routes.get(route_id)
                 if route:
-                    route.transmission_efficiency = orig_eff
+                    # Permanent efficiency scar from surge damage
+                    route.transmission_efficiency = max(
+                        0.10, orig_eff - LINGERING_EFFICIENCY_LOSS
+                    )
             self._log(
-                f"  [Surge] Transmission efficiency restored on "
-                f"{len(originals)} routes"
+                f"  [Surge] Transmission partially restored on "
+                f"{len(originals)} routes (permanent {LINGERING_EFFICIENCY_LOSS*100:.0f}% scar)"
             )
- 
+
         elif ctype == CrisisType.ECONOMIC_RECESSION:
             zone = self.zones.get(crisis.target_id)
             if zone:
                 original = crisis.parameters.get("_original_income_modifier", 1.0)
-                zone.economy.income_modifier = original
- 
+                # Recession leaves lasting economic damage
+                zone.economy.income_modifier = max(0.20, original - 0.20)
+                zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY * 2)
+
         elif ctype == CrisisType.REGIONAL_BLACKOUT:
             region = crisis.parameters.get("region", crisis.target_id)
             for zone in self.zones.values():
                 if zone.region == region:
-                    zone.demand_modifier = 1.0
- 
+                    zone.demand_modifier = LINGERING_DEMAND_MODIFIER
+                    zone.morale = max(0.0, zone.morale - LINGERING_MORALE_PENALTY * 2)
+
+        # EQUIPMENT_FAILURE: intentionally NOT auto-restored -- needs repair_source action
+        # STORAGE_LEAK: simply stops leaking; no state to restore
+
+    # ──────────────────────────────────────────
+    # GOVERNOR AGENT ACTIONS
+    # Pattern: 1) look up zone  2) check not collapsed  3) spend budget
+    #          4) apply effect  5) log
+    # ──────────────────────────────────────────
+
     def _check_and_spend(self, zone: Zone, action_name: str, cost_override: float = None) -> bool:
         cost = cost_override if cost_override is not None else ACTION_COSTS.get(action_name, 0.0)
         if not zone.economy.spend(cost):
@@ -1196,7 +1313,9 @@ class SimulationEngine:
             )
             return False
         return True
-  
+
+    # ── Original actions ─────────────────────────────────────────────────
+
     def action_ration_energy(self, zone_id: str, reduction_pct: float) -> bool:
         """
         Reduce demand by reduction_pct (0.0-1.0). Latency: 1 tick.
@@ -1211,7 +1330,7 @@ class SimulationEngine:
                            {"zone_id": zone_id, "reduction_pct": reduction_pct},
                            ACTION_LATENCY["ration_energy"])
         return True
- 
+
     def action_boost_source(
         self, zone_id: str, source_id: str, boost_factor: float = 1.5
     ) -> bool:
@@ -1219,6 +1338,7 @@ class SimulationEngine:
         zone = self.zones.get(zone_id)
         if not zone or zone.stability_state == StabilityState.COLLAPSED:
             return False
+        # Validate source exists before spending
         if not any(s.source_id == source_id for s in zone.sources):
             self._log(f"  [Action] {zone.name}: source {source_id} not found")
             return False
@@ -1228,7 +1348,7 @@ class SimulationEngine:
                            {"zone_id": zone_id, "source_id": source_id, "boost_factor": boost_factor},
                            ACTION_LATENCY["boost_source"])
         return True
- 
+
     def action_repair_route(self, zone_id: str, route_id: str, repair_amount: float = 20.0) -> bool:
         """
         Restore route_health on a damaged trade route. Latency: 2 ticks.
@@ -1247,7 +1367,7 @@ class SimulationEngine:
                            {"route_id": route_id, "repair_amount": repair_amount},
                            ACTION_LATENCY["repair_route"])
         return True
- 
+
     def action_open_trade_route(
         self,
         source_zone_id: str,
@@ -1291,7 +1411,7 @@ class SimulationEngine:
                            {"route": route},
                            ACTION_LATENCY["open_trade_route"])
         return route_id
- 
+
     def action_close_trade_route(self, zone_id: str, route_id: str) -> bool:
         """Close an existing trade route. Latency: 1 tick. Cost: {close_trade_route} credits."""
         zone = self.zones.get(zone_id)
@@ -1303,7 +1423,7 @@ class SimulationEngine:
                            {"route_id": route_id},
                            ACTION_LATENCY["close_trade_route"])
         return True
- 
+
     def action_emergency_broadcast(self, zone_id: str, message: str) -> bool:
         """Broadcast a message to all neighboring zones. FREE. Immediate (latency: 0)."""
         zone = self.zones.get(zone_id)
@@ -1329,7 +1449,7 @@ class SimulationEngine:
             f"  [Action] {zone.name} broadcast to {len(neighbors)} neighbors: '{message}'"
         )
         return True
- 
+
     def action_upgrade_storage(self, zone_id: str, additional_capacity: float) -> bool:
         """Expand a zone's storage capacity. Latency: 3 ticks. Cost: {upgrade_storage} credits."""
         zone = self.zones.get(zone_id)
@@ -1341,8 +1461,9 @@ class SimulationEngine:
                            {"zone_id": zone_id, "additional_capacity": additional_capacity},
                            ACTION_LATENCY["upgrade_storage"])
         return True
- 
- 
+
+    # ── New actions ───────────────────────────────────────────────────────
+
     def action_fortify_route(self, zone_id: str, route_id: str) -> bool:
         """
         Harden a trade route against attack damage. Latency: 2 ticks.
@@ -1362,30 +1483,23 @@ class SimulationEngine:
                            {"route_id": route_id},
                            ACTION_LATENCY["fortify_route"])
         return True
- 
+
     def action_sell_surplus(
         self, zone_id: str, amount: float, rate: float = 0.50
     ) -> bool:
         """
-        Convert stored energy into budget credits at below-market rate.
-        Default rate: 0.50 credits per unit. Immediate (latency: 0). FREE action.
+        DISABLED: Energy-to-cash conversion is no longer permitted.
+        Zones cannot sell energy for budget credits. Energy can only be
+        traded between zones via trade offers (energy-for-energy only).
         """
         zone = self.zones.get(zone_id)
-        if not zone or zone.stability_state == StabilityState.COLLAPSED:
-            return False
-        withdrawn = zone.storage.withdraw(amount)
-        if withdrawn <= 0:
-            self._log(f"  [Action] {zone.name}: no energy available to sell")
-            return False
-        earned = withdrawn * rate
-        zone.economy.budget += earned
-        zone.economy.total_earned += earned
+        zone_name = zone.name if zone else zone_id
         self._log(
-            f"  [Action] {zone.name}: sold {withdrawn:.1f} energy "
-            f"for {earned:.1f} credits (rate {rate:.2f})"
+            f"  [Action] {zone_name}: sell_surplus BLOCKED — "
+            f"energy-cash conversion is disabled. Use inter-zone energy trades instead."
         )
-        return True
- 
+        return False
+
     def action_build_new_route(
         self,
         source_zone_id: str,
@@ -1426,7 +1540,7 @@ class SimulationEngine:
             f"| completes in {construction_ticks} ticks"
         )
         return route_id
- 
+
     def action_invest_in_efficiency(
         self, zone_id: str, source_id: str, improvement_pct: float = 0.10
     ) -> bool:
@@ -1448,7 +1562,7 @@ class SimulationEngine:
                             "improvement_pct": improvement_pct},
                            ACTION_LATENCY["invest_in_efficiency"])
         return True
- 
+
     def action_set_export_cap(
         self, zone_id: str, route_id: str, max_rate: Optional[float]
     ) -> bool:
@@ -1478,7 +1592,7 @@ class SimulationEngine:
                 f"on {route_id}"
             )
         return True
- 
+
     def action_deploy_emergency_generator(
         self, zone_id: str, output_rate: float = 30.0, duration: int = 4
     ) -> bool:
@@ -1504,7 +1618,7 @@ class SimulationEngine:
                             "output_rate": output_rate, "duration": duration},
                            ACTION_LATENCY["deploy_emergency_generator"])
         return True
- 
+
     def action_request_aid(
         self, requesting_zone_id: str, donor_zone_id: str, amount: float
     ) -> bool:
@@ -1533,7 +1647,7 @@ class SimulationEngine:
                             "donor_zone_id": donor_zone_id, "amount": amount},
                            ACTION_LATENCY["request_aid"])
         return True
- 
+
     def action_issue_conservation_order(
         self, zone_id: str, reduction_pct: float
     ) -> bool:
@@ -1552,7 +1666,7 @@ class SimulationEngine:
                            {"zone_id": zone_id, "reduction_pct": reduction_pct},
                            ACTION_LATENCY["issue_conservation_order"])
         return True
- 
+
     def action_settle_worker_strike(self, zone_id: str, source_id: str) -> bool:
         """
         Negotiate an end to an active WORKER_STRIKE crisis. Latency: 1 tick.
@@ -1561,6 +1675,7 @@ class SimulationEngine:
         zone = self.zones.get(zone_id)
         if not zone:
             return False
+        # Verify there is a strike to settle before spending
         strike = next(
             (c for c in self.crisis_events
              if c.crisis_type == CrisisType.WORKER_STRIKE
@@ -1577,7 +1692,7 @@ class SimulationEngine:
                            {"zone_id": zone_id, "source_id": source_id},
                            ACTION_LATENCY["settle_worker_strike"])
         return True
- 
+
     def action_repair_source(self, zone_id: str, source_id: str) -> bool:
         """
         Restore an offline EnergySource to active=True. Latency: 2 ticks.
@@ -1599,6 +1714,7 @@ class SimulationEngine:
                 f"-- active worker strike (use settle_worker_strike)"
             )
             return False
+        # Verify source exists and is offline
         target_source = next(
             (s for s in zone.sources if s.source_id == source_id and not s.active), None
         )
@@ -1611,7 +1727,7 @@ class SimulationEngine:
                            {"zone_id": zone_id, "source_id": source_id},
                            ACTION_LATENCY["repair_source"])
         return True
- 
+
     def action_monitor_zone(
         self, observer_zone_id: str, target_zone_id: str, duration: int = 5
     ) -> bool:
@@ -1632,7 +1748,9 @@ class SimulationEngine:
             f"for {duration} ticks"
         )
         return True
-  
+
+    # ── Trade offer actions ───────────────────────────────────────────────
+
     def action_propose_trade(
         self,
         from_zone_id: str,
@@ -1648,13 +1766,13 @@ class SimulationEngine:
         Propose a bilateral trade deal to another zone. Immediate delivery (latency: 0).
         The offer specifies what the initiating zone will GIVE and what it WANTS in return.
         Resources are NOT committed until the target zone calls action_accept_trade().
- 
+
         Parameters:
             energy_offered    -- units of energy from_zone gives to to_zone
             budget_offered    -- credits from_zone gives to to_zone
             energy_requested  -- units of energy from_zone wants from to_zone
             budget_requested  -- credits from_zone wants from to_zone
- 
+
         Cost: {propose_trade} credits (admin/diplomatic fee).
         Returns offer_id on success, None on failure.
         """
@@ -1667,7 +1785,7 @@ class SimulationEngine:
             return None
         if not self._check_and_spend(from_zone, "propose_trade"):
             return None
- 
+
         offer_id = f"offer_{uuid.uuid4().hex[:8]}"
         desc = description or (
             f"{from_zone.name} offers {energy_offered:.0f}E + {budget_offered:.0f}B "
@@ -1685,7 +1803,8 @@ class SimulationEngine:
             description=desc,
         )
         self._pending_trade_offers[offer_id] = offer
- 
+
+        # Deliver as a message to the target zone so its governor can act on it
         to_zone.messages.append({
             "from": from_zone_id,
             "type": "trade_offer",
@@ -1698,7 +1817,7 @@ class SimulationEngine:
             "description": desc,
             "tick": self.tick_number,
         })
- 
+
         self._log(
             f"  [Trade] Offer {offer_id}: {from_zone.name} -> {to_zone.name} | "
             f"gives [{energy_offered:.0f}E, {budget_offered:.0f}B] | "
@@ -1706,7 +1825,7 @@ class SimulationEngine:
             f"expires tick {offer.expires_at_tick}"
         )
         return offer_id
- 
+
     def action_accept_trade(self, zone_id: str, offer_id: str) -> bool:
         """
         Accept a pending trade offer addressed to this zone. Latency: 1 tick (settlement).
@@ -1735,7 +1854,7 @@ class SimulationEngine:
             offer.status = "expired"
             self._log(f"  [Trade] {zone.name}: offer {offer_id} has expired")
             return False
- 
+
         offer.status = "accepted"
         self._log(
             f"  [Trade] {zone.name} accepted offer {offer_id} -- "
@@ -1745,7 +1864,7 @@ class SimulationEngine:
                            {"offer_id": offer_id},
                            ACTION_LATENCY["accept_trade"])
         return True
- 
+
     def action_reject_trade(self, zone_id: str, offer_id: str) -> bool:
         """
         Reject a pending trade offer addressed to this zone. Immediate. FREE.
@@ -1767,10 +1886,11 @@ class SimulationEngine:
                 f"(status: {offer.status})"
             )
             return False
- 
+
         offer.status = "rejected"
         self._log(f"  [Trade] {zone.name} rejected offer {offer_id}")
- 
+
+        # Notify the initiating zone
         from_zone = self.zones.get(offer.from_zone_id)
         if from_zone:
             from_zone.messages.append({
@@ -1782,23 +1902,25 @@ class SimulationEngine:
                 "tick": self.tick_number,
             })
         return True
- 
+
     def _execute_accepted_trade(self, offer_id: str):
         """
         Internal: settle an accepted trade offer (called from _apply_pending_action).
         Validates both parties still have sufficient resources; transfers atomically.
+        ENERGY-ONLY: Budget components are ignored (forced to 0).
         """
         offer = self._pending_trade_offers.get(offer_id)
         if not offer or offer.status != "accepted":
             self._log(f"  [Trade] Settlement: offer {offer_id} not in accepted state — skipped")
             return
- 
+
         from_zone = self.zones.get(offer.from_zone_id)
         to_zone   = self.zones.get(offer.to_zone_id)
         if not from_zone or not to_zone:
             self._log(f"  [Trade] Settlement: zone(s) for offer {offer_id} no longer exist")
             return
- 
+
+        # Validate both sides can honour the deal
         failures = []
         if from_zone.storage.stored_energy < offer.energy_offered:
             failures.append(
@@ -1820,13 +1942,14 @@ class SimulationEngine:
                 f"{to_zone.name} lacks budget "
                 f"(needs {offer.budget_requested:.0f}, has {to_zone.economy.budget:.0f})"
             )
- 
+
         if failures:
             self._log(
                 f"  [Trade] Settlement failed for offer {offer_id}: "
                 + "; ".join(failures)
             )
             offer.status = "expired"
+            # Notify both parties
             msg = {
                 "from": "trade_system",
                 "type": "trade_settlement_failed",
@@ -1838,28 +1961,31 @@ class SimulationEngine:
             from_zone.messages.append(msg)
             to_zone.messages.append(msg)
             return
- 
+
+        # Execute atomically
         from_zone.storage.withdraw(offer.energy_offered)
         from_zone.economy.spend(offer.budget_offered)
         to_zone.storage.deposit(offer.energy_offered)
         to_zone.economy.budget += offer.budget_offered
         to_zone.economy.total_earned += offer.budget_offered
- 
+
         to_zone.storage.withdraw(offer.energy_requested)
         to_zone.economy.spend(offer.budget_requested)
         from_zone.storage.deposit(offer.energy_requested)
         from_zone.economy.budget += offer.budget_requested
         from_zone.economy.total_earned += offer.budget_requested
- 
+
+        # Reputation boost for successful bilateral deal
         from_zone.reputation = min(100.0, from_zone.reputation + 1.0)
         to_zone.reputation   = min(100.0, to_zone.reputation   + 1.0)
- 
+
         self._log(
             f"  [Trade] Settled offer {offer_id}: "
             f"{from_zone.name} gave [{offer.energy_offered:.0f}E, {offer.budget_offered:.0f}B] | "
             f"{to_zone.name} gave [{offer.energy_requested:.0f}E, {offer.budget_requested:.0f}B]"
         )
- 
+
+        # Success notifications
         for z, partner in ((from_zone, to_zone.name), (to_zone, from_zone.name)):
             z.messages.append({
                 "from": "trade_system",
@@ -1869,18 +1995,22 @@ class SimulationEngine:
                 "description": f"Trade {offer_id} with {partner} settled successfully.",
                 "tick": self.tick_number,
             })
- 
+
+    # ──────────────────────────────────────────
+    # OBSERVABILITY
+    # ──────────────────────────────────────────
+
     def get_zone_state(
         self, zone_id: str, observer_zone_id: Optional[str] = None
     ) -> dict:
         """
         Return a structured snapshot of a zone's state.
- 
+
         Visibility levels:
           full    — observer is the zone itself, or has an active monitor_zone
           partial — observer has an active trade route with the zone
           minimal — no connection; only name + stability visible
- 
+
         If the zone is cyber_attacked, numeric values in full/partial views
         are corrupted with noise (+/-30%), simulating compromised instruments.
         The zone's own governor is also affected (cannot trust its readings).
@@ -1888,7 +2018,8 @@ class SimulationEngine:
         zone = self.zones.get(zone_id)
         if not zone:
             return {}
- 
+
+        # Determine visibility
         if observer_zone_id is None or observer_zone_id == zone_id:
             visibility = "full"
         else:
@@ -1907,7 +2038,8 @@ class SimulationEngine:
                 visibility = "partial"
             else:
                 visibility = "minimal"
- 
+
+        # Minimal: only public-facing info
         if visibility == "minimal":
             return {
                 "zone_id": zone.zone_id,
@@ -1915,13 +2047,14 @@ class SimulationEngine:
                 "stability_state": zone.stability_state.value,
                 "visibility": "minimal",
             }
- 
+
+        # Noise function for cyber-attacked zones
         def n(value: float) -> float:
             if zone.cyber_attacked:
                 noise = self.rng.uniform(-0.30, 0.30) * abs(value)
                 return round(value + noise, 2)
             return round(value, 2)
- 
+
         base = {
             "zone_id": zone.zone_id,
             "name": zone.name,
@@ -1941,10 +2074,11 @@ class SimulationEngine:
             "season": self.season.value,
             "visibility": visibility,
         }
- 
+
         if visibility == "partial":
             return base
- 
+
+        # Full visibility — add all details
         base.update({
             "total_spilled": round(zone.storage.total_spilled, 2),
             "energy_gain_this_tick": n(zone.energy_gain_per_tick),
@@ -1999,6 +2133,7 @@ class SimulationEngine:
                 for c in self.crisis_events
                 if c.target_id == zone_id
             ],
+            # Pending (deferred) actions queued by this zone
             "pending_actions": [
                 {
                     "action_id":    a["action_id"],
@@ -2009,6 +2144,7 @@ class SimulationEngine:
                 for a in self._pending_actions
                 if a.get("zone_name") == zone.name
             ],
+            # Incoming trade offers waiting for a response from this zone
             "incoming_trade_offers": [
                 {
                     "offer_id":         o.offer_id,
@@ -2023,6 +2159,7 @@ class SimulationEngine:
                 for o in self._pending_trade_offers.values()
                 if o.to_zone_id == zone_id and o.status == "pending"
             ],
+            # Outgoing trade offers this zone has sent that are still open
             "outgoing_trade_offers": [
                 {
                     "offer_id":         o.offer_id,
@@ -2039,7 +2176,7 @@ class SimulationEngine:
             ],
         })
         return base
- 
+
     def print_status(self):
         """Print a human-readable summary of all zones and active routes."""
         print(f"\n{'─'*80}")
@@ -2074,6 +2211,7 @@ class SimulationEngine:
                 f"rep: {zone.reputation:5.1f} | "
                 f"{zone.stability_state.value}{cyber}"
             )
+        # Active crises summary
         if self.crisis_events:
             print(f"\n  Active crises:")
             for c in self.crisis_events:
@@ -2081,9 +2219,11 @@ class SimulationEngine:
                     f"    {c.crisis_type.value:<22} -> {c.target_id:<20} "
                     f"({c.remaining_ticks}t left) {c.description}"
                 )
+        # Embargoed routes
         if self.embargoed_routes:
             print(f"  Embargoed routes: {', '.join(self.embargoed_routes)}")
- 
+
+        # Pending (deferred) actions
         if self._pending_actions:
             print(f"\n  Pending actions ({len(self._pending_actions)}):")
             for a in sorted(self._pending_actions, key=lambda x: x["apply_at_tick"]):
@@ -2092,7 +2232,8 @@ class SimulationEngine:
                     f"    {a['action_type']:<30} | zone: {a['zone_name']:<10} "
                     f"| applies in {ticks_left}t (tick {a['apply_at_tick']})"
                 )
- 
+
+        # Pending trade offers
         pending_offers = [
             o for o in self._pending_trade_offers.values()
             if o.status == "pending"
@@ -2107,7 +2248,11 @@ class SimulationEngine:
                     f"| expires tick {o.expires_at_tick}"
                 )
         print()
- 
+
+    # ──────────────────────────────────────────
+    # HELPERS
+    # ──────────────────────────────────────────
+
     def _get_neighbor_ids(self, zone_id: str) -> set:
         """Return zone IDs connected to zone_id via any trade route."""
         neighbors = set()
@@ -2117,9 +2262,8 @@ class SimulationEngine:
             elif route.target_zone_id == zone_id:
                 neighbors.add(route.source_zone_id)
         return neighbors
- 
+
     def _log(self, message: str):
         entry = {"tick": self.tick_number, "message": message}
         self.event_log.append(entry)
         logger.debug(message)
-   

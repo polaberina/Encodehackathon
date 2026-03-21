@@ -1,70 +1,123 @@
-from dataclasses import dataclass, field 
-from enum import Enum 
-from typing import Optional 
+"""
+models.py — Core data models for the Crisis Management Simulation.
+
+Design principle: Keep data and logic separate. These are pure data containers
+(dataclasses + enums). Behavior lives in the engine.
+
+Changes in v3 (Extended):
+  - New CrisisType values: DROUGHT, HEAT_WAVE, EQUIPMENT_FAILURE, STORAGE_LEAK,
+    ECONOMIC_RECESSION, CYBER_ATTACK, POLITICAL_EMBARGO, TRANSMISSION_SURGE,
+    WILDFIRE, WORKER_STRIKE, REGIONAL_BLACKOUT. CASCADING_FAILURE is now fully
+    implemented (zone-wide collapse + neighbour spread).
+  - Season enum: SPRING, SUMMER, AUTUMN, WINTER. Engine applies seasonal
+    multipliers to sources (solar/hydro/wind) and zone demand each tick.
+  - EnergySource gains:
+      - degradation_modifier / degradation_rate / efficiency_floor: sources
+        slowly lose output over time unless maintained.
+      - age: ticks since source was created.
+      - seasonal_modifier: set by engine each tick based on season + energy type.
+      - current_output now composes output_modifier x degradation_modifier x
+        seasonal_modifier for a realistic multi-factor output model.
+  - TradeRoute gains:
+      - export_cap: governor can cap how much a route exports per tick.
+      - fortification: reduces incoming ROUTE_ATTACK damage (0.0-1.0).
+  - Zone gains:
+      - morale: 0-100. Low morale raises demand and reduces budget income.
+      - reputation: 0-100. Decreases when trade promises are not met.
+      - region: string tag for regional crises (REGIONAL_BLACKOUT).
+      - cyber_attacked: bool flag; engine adds noise to observations.
+      - seasonal_demand_modifier: set by engine each tick.
+      - _consecutive_critical_ticks: tracks compound morale degradation.
+  - Economy gains income_modifier field (for ECONOMIC_RECESSION crises).
+  - Zone.energy_demand_per_tick now factors in morale and seasonal modifiers.
+  - EarlyWarningSignal dataclass for scheduled-crisis warning system.
+"""
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
+
+# ─────────────────────────────────────────────
+# ENUMS
+# ─────────────────────────────────────────────
 
 class EnergyType(Enum):
-    """ 
-    Types of energy sources.
-    """
-
+    """The types of energy sources available in the simulation."""
     SOLAR = "solar"
     HYDRO = "hydro"
     WIND = "wind"
     FOSSIL = "fossil"
     NUCLEAR = "nuclear"
 
-class StabilityState(Enum):
-    """ 
-    Stability rates. 
-    """
 
+class StabilityState(Enum):
+    """
+    The four stability states of a zone.
+    Ordered from best to worst — useful for comparisons.
+    """
     STABLE = "stable"
     WARNING = "warning"
     CRITICAL = "critical"
     COLLAPSED = "collapsed"
 
+
 class CrisisType(Enum):
-    SUPPLY_DISRUPTION   = "supply_disruption"    # Reduces a source's output modifier
+    """All crisis event types the Crisis Agent can inject."""
+
+    # ── Original ───────────────────────────────────────────────────────────
+    SUPPLY_DISRUPTION   = "supply_disruption"   # Reduces a source's output modifier
     DEMAND_SPIKE        = "demand_spike"         # Raises zone demand modifier
     ROUTE_ATTACK        = "route_attack"         # Damages route health per tick
     CASCADING_FAILURE   = "cascading_failure"    # Zone-wide output collapse + spread
+
+    # ── Physical / environmental ───────────────────────────────────────────
     DROUGHT             = "drought"              # All hydro sources cut to low output
     HEAT_WAVE           = "heat_wave"            # Higher demand + solar panels overheat
     WILDFIRE            = "wildfire"             # Burns a source AND a nearby route
     EQUIPMENT_FAILURE   = "equipment_failure"    # Source goes offline; needs manual repair
     STORAGE_LEAK        = "storage_leak"         # Stored energy bleeds per tick
+
+    # ── Economic / political ───────────────────────────────────────────────
     ECONOMIC_RECESSION  = "economic_recession"   # Reduces budget income
     WORKER_STRIKE       = "worker_strike"        # Reduces source output; needs settlement
     POLITICAL_EMBARGO   = "political_embargo"    # Freezes a trade route for N ticks
+
+    # ── Technical / systemic ──────────────────────────────────────────────
     CYBER_ATTACK        = "cyber_attack"         # Corrupts zone observation data
     TRANSMISSION_SURGE  = "transmission_surge"   # All routes in/out lose efficiency
     REGIONAL_BLACKOUT   = "regional_blackout"    # Demand spike across an entire region
 
+
 class Season(Enum):
     """
-    The four seasons. The engine advances the season every N ticks. 
-    solar peeks in summer
-    hydro in spring
-    demand peak in winter
-
+    The four seasons. The engine advances the season every N ticks (configurable
+    via engine.ticks_per_season). Seasonal multipliers create predictable background
+    pressure that agents must plan around — solar peaks in summer, hydro in spring,
+    demand peaks in winter.
     """
     SPRING = "spring"
     SUMMER = "summer"
     AUTUMN = "autumn"
     WINTER = "winter"
 
+
+# ─────────────────────────────────────────────
+# STORAGE
+# ─────────────────────────────────────────────
+
 @dataclass
 class Storage:
     """
     A zone's energy storage tank.
- 
+
     deposit(amount) -> returns how much was actually stored; overflow -> total_spilled.
     withdraw(amount) -> returns how much was actually withdrawn (capped at stored).
     """
     capacity: float
     stored_energy: float = 0.0
     total_spilled: float = 0.0
- 
+
     def deposit(self, amount: float) -> float:
         if amount <= 0:
             return 0.0
@@ -73,36 +126,45 @@ class Storage:
         self.stored_energy += stored
         self.total_spilled += (amount - stored)
         return stored
- 
+
     def withdraw(self, amount: float) -> float:
         if amount <= 0:
             return 0.0
         withdrawn = min(amount, self.stored_energy)
         self.stored_energy -= withdrawn
         return withdrawn
- 
+
     @property
     def fill_pct(self) -> float:
         if self.capacity <= 0:
             return 0.0
         return (self.stored_energy / self.capacity) * 100.0
-    
+
+
+# ─────────────────────────────────────────────
+# ECONOMY
+# ─────────────────────────────────────────────
+
 @dataclass
 class Economy:
     """
     A zone's economic system.
+
+    income_modifier: scaled by ECONOMIC_RECESSION crises. The engine also
+    applies a morale factor in _step_economy before calling earn(), so both
+    crisis effects and public confidence affect budget income simultaneously.
     """
     budget_per_tick: float = 100.0
     budget: float = 0.0
     total_earned: float = 0.0
     total_spent: float = 0.0
     income_modifier: float = 1.0    # Reduced by ECONOMIC_RECESSION crises
- 
+
     def earn(self, amount: float):
         """Credit the zone's account. Called by the engine each tick."""
         self.budget += amount
         self.total_earned += amount
- 
+
     def spend(self, amount: float) -> bool:
         """Attempt to spend credits. Returns True if successful."""
         if self.budget >= amount:
@@ -110,24 +172,29 @@ class Economy:
             self.total_spent += amount
             return True
         return False
-    
+
+
+# ─────────────────────────────────────────────
+# ENERGY SOURCES
+# ─────────────────────────────────────────────
+
 @dataclass
 class EnergySource:
     """
     A single energy-producing asset inside a zone.
- 
-    Output model:
+
+    Output model (v3):
         current_output = _sampled_output
                          x output_modifier       (crises / boosts)
                          x degradation_modifier  (aging)
                          x seasonal_modifier     (season + energy type)
- 
+
     Aging:
         age increments each tick. Every 5 ticks the engine reduces
         degradation_modifier by degradation_rate (floors at efficiency_floor).
         Use action_invest_in_efficiency to permanently raise output rates and
         partially reset degradation.
- 
+
     Temporary sources (emergency generators):
         The engine tracks these in _temp_sources and removes them after their
         duration expires. They age normally but degradation_rate is typically 0.
@@ -137,17 +204,18 @@ class EnergySource:
     low_output_rate: float
     high_output_rate: float
     resilience: float           # 0.0-1.0; lower = more vulnerable to crises
- 
+
+    # ── Runtime state ─────────────────────────────────────────────────────
     active: bool = True
     output_modifier: float = 1.0        # Crisis/boost modifier
-    degradation_modifier: float = 1.0   # Aging modifier, decreases over time
+    degradation_modifier: float = 1.0   # Aging modifier; decreases over time
     degradation_rate: float = 0.002     # Fraction reduction per aging step (every 5 ticks)
     efficiency_floor: float = 0.60      # degradation_modifier minimum
     age: int = 0                        # Ticks since source was created
     seasonal_modifier: float = 1.0      # Set by engine from SEASONAL_SOURCE_MODIFIERS
- 
+
     _sampled_output: float = 0.0        # Set by engine._sample_output() each tick
- 
+
     @property
     def current_output(self) -> float:
         """
@@ -160,13 +228,13 @@ class EnergySource:
                 * self.output_modifier
                 * self.degradation_modifier
                 * self.seasonal_modifier)
- 
+
     def _sample_output(self, rng) -> float:
         """Draw a fresh random output for this tick and store it."""
         raw = rng.uniform(self.low_output_rate, self.high_output_rate)
         self._sampled_output = raw
         return raw
- 
+
     @property
     def expected_output(self) -> float:
         """
@@ -176,18 +244,23 @@ class EnergySource:
         """
         base = (self.low_output_rate + self.high_output_rate) / 2.0
         return base * self.degradation_modifier * self.seasonal_modifier
-    
+
+
+# ─────────────────────────────────────────────
+# TRADE ROUTES
+# ─────────────────────────────────────────────
+
 @dataclass
 class TradeRoute:
     """
     An active energy transfer agreement between two zones.
- 
-    export_cap:
+
+    export_cap (new):
         Optional ceiling on energy sent per tick. Set via action_set_export_cap.
         None = no cap. Allows governors to protect themselves during stress
         without fully closing the route. Respected by effective_transfer_rate.
- 
-    fortification:
+
+    fortification (new):
         0.0-1.0; reduces ROUTE_ATTACK damage fraction per tick.
         Set via action_fortify_route. Represents physical hardening of
         transmission infrastructure (buried cables, redundant paths, etc.)
@@ -201,12 +274,12 @@ class TradeRoute:
     latency: int = 1
     route_health: float = 100.0
     transmission_efficiency: float = 0.90
- 
+
     in_flight: list = field(default_factory=list)
- 
+
     export_cap: Optional[float] = None  # None = unrestricted
     fortification: float = 0.0          # 0.0-1.0 damage reduction
- 
+
     @property
     def effective_transfer_rate(self) -> float:
         """Energy deducted from source per tick (full sent amount, health-scaled, cap-applied)."""
@@ -214,87 +287,93 @@ class TradeRoute:
         if self.export_cap is not None:
             base = min(base, self.export_cap)
         return base
- 
+
     @property
     def effective_received_rate(self) -> float:
         """Energy received by target per tick (after heat loss)."""
         return self.effective_transfer_rate * self.transmission_efficiency
- 
+
     @property
     def heat_loss_rate(self) -> float:
         return self.effective_transfer_rate - self.effective_received_rate
- 
+
     @property
     def is_severed(self) -> bool:
         return self.route_health <= 0
-    
+
+
+# ─────────────────────────────────────────────
+# ZONES
+# ─────────────────────────────────────────────
+
 @dataclass
 class Zone:
     """
     The central entity in the simulation.
- 
+
     morale (0-100):
         Tracks public trust and zone cohesion. Falls when the zone is in Warning/
         Critical state; rises slowly when Stable. Below 50, morale raises effective
         demand (panic buying, black-market inefficiency) and reduces budget income.
         Morale degradation compounds: consecutive Critical ticks cause accelerating
         loss, making recovery harder the longer a zone stays in crisis.
- 
+
     reputation (0-100):
         Tracks trade reliability. Falls when a trade route the zone sources delivers
         zero energy (storage ran dry mid-commitment). Rises slowly when Stable.
         Low reputation means partner zones are less willing to accept new trade
         offers (encoded as higher cost to action_open_trade_route when rep < 50).
- 
+
     region (str):
         Tag for REGIONAL_BLACKOUT crises. All zones sharing the same region tag
         are hit simultaneously when a regional event fires.
- 
+
     cyber_attacked (bool):
         When True, get_zone_state() returns noisy observations. The zone's own
         governor receives corrupted readings, forcing decisions under uncertainty.
- 
+
     seasonal_demand_modifier:
         Set by engine each tick from SEASONAL_DEMAND_MODIFIERS. Winter raises
         demand; summer is neutral; spring/autumn give slight relief.
     """
     zone_id: str
     name: str
- 
+
     sources: list = field(default_factory=list)
     storage: Storage = field(default_factory=lambda: Storage(capacity=1000.0, stored_energy=500.0))
     economy: Economy = field(default_factory=Economy)
- 
+
     base_demand: float = 50.0
     demand_modifier: float = 1.0
- 
+
     low_threshold: float = 100.0
     warning_window: int = 5
     critical_window: int = 2
- 
+
     stability_state: StabilityState = StabilityState.STABLE
     net_energy_per_tick: float = 0.0
     projected_depletion_ticks: Optional[float] = None
- 
+
     messages: list = field(default_factory=list)
- 
+
+    # ── New v3 fields ──────────────────────────────────────────────────────
     morale: float = 100.0
     reputation: float = 100.0
     region: str = "default"
     cyber_attacked: bool = False
     seasonal_demand_modifier: float = 1.0
     _consecutive_critical_ticks: int = 0
- 
+
     @property
     def energy_gain_per_tick(self) -> float:
         """Total output from all active sources this tick (reads sampled values)."""
         return sum(s.current_output for s in self.sources)
- 
+
     @property
     def expected_energy_gain(self) -> float:
         """Expected (mean) gain — safe to call without sampling."""
         return sum(s.expected_output for s in self.sources if s.active)
- 
+
     @property
     def energy_demand_per_tick(self) -> float:
         """
@@ -305,23 +384,28 @@ class Zone:
         """
         morale_factor = 1.0 + max(0.0, (50.0 - self.morale) / 200.0)
         return self.base_demand * self.demand_modifier * self.seasonal_demand_modifier * morale_factor
- 
+
     @property
     def stored_energy(self) -> float:
         return self.storage.stored_energy
- 
+
     @property
     def storage_capacity(self) -> float:
         return self.storage.capacity
-    
+
+
+# ─────────────────────────────────────────────
+# CRISIS EVENTS
+# ─────────────────────────────────────────────
+
 @dataclass
 class CrisisEvent:
     """
     A crisis injected by the Crisis Agent (or scripted for testing).
- 
+
     target_id: zone_id, route_id, or region name depending on crisis_type.
     parameters: flexible dict for crisis-specific data.
- 
+
     Common parameter keys used by the engine:
         source_id           — which EnergySource is affected
         output_modifier     — modifier applied to source output
@@ -336,8 +420,8 @@ class CrisisEvent:
         solar_output_modifier — solar-specific modifier for HEAT_WAVE
         spreading           — bool, CASCADING_FAILURE propagates to neighbours
         spread_modifier     — how badly neighbours are hit in CASCADING_FAILURE
- 
-    Internal keys (will be written by engine on first application, do not set manually):
+
+    Internal keys (written by engine on first application, do not set manually):
         _originals          — saved original values for reversible effects
         _initialized        — bool, prevents re-applying one-time first-tick effects
         _spread_applied     — bool, prevents duplicate cascade spread
@@ -352,42 +436,29 @@ class CrisisEvent:
     description: str = ""
 
 
-@dataclass
-class EarlyWarningSignal:
-    """
-    A predictive signal delivered to a zone before a scheduled crisis fires.
- 
-    Generated by engine.schedule_crisis() when warning_ticks > 0.
-    The probability field reflects signal confidence — it is intentionally
-    noisy (agents can't fully trust it). Delivered as a structured message
-    in zone.messages so the governor hook can observe and act on it.
-    """
-    signal_id: str
-    signal_type: str        # Mirrors the CrisisType value string
-    target_id: str
-    probability: float      # 0.0-1.0; noisy confidence estimate
-    ticks_until_event: int
-    description: str
+# ─────────────────────────────────────────────
+# TRADE OFFERS
+# ─────────────────────────────────────────────
 
 @dataclass
 class TradeOffer:
     """
     A bilateral trade proposal between two zones.
- 
+
     The initiating zone (from_zone_id) proposes to:
       • Give  energy_offered  units of energy  TO   to_zone_id
       • Give  budget_offered  credits           TO   to_zone_id
       • Receive energy_requested units of energy FROM to_zone_id
       • Receive budget_requested credits        FROM to_zone_id
- 
+
     Any of the four quantities can be 0 (e.g. a pure energy-for-budget deal
     sets energy_requested=0 and budget_offered=0).
- 
+
     The offer must be explicitly accepted by the target zone via
     action_accept_trade() before any resources move.  Until then it sits in
     the engine's _pending_trade_offers dict and appears in the target zone's
     messages queue so its governor can inspect and decide.
- 
+
     status lifecycle:
         "pending"  → offer is live, waiting for a response
         "accepted" → target accepted; resources were transferred atomically
@@ -404,8 +475,25 @@ class TradeOffer:
     expires_at_tick: int
     status: str = "pending"    # "pending" | "accepted" | "rejected" | "expired"
     description: str = ""
-    
-
-    
 
 
+# ─────────────────────────────────────────────
+# EARLY WARNING SIGNALS
+# ─────────────────────────────────────────────
+
+@dataclass
+class EarlyWarningSignal:
+    """
+    A predictive signal delivered to a zone before a scheduled crisis fires.
+
+    Generated by engine.schedule_crisis() when warning_ticks > 0.
+    The probability field reflects signal confidence — it is intentionally
+    noisy (agents can't fully trust it). Delivered as a structured message
+    in zone.messages so the governor hook can observe and act on it.
+    """
+    signal_id: str
+    signal_type: str        # Mirrors the CrisisType value string
+    target_id: str
+    probability: float      # 0.0-1.0; noisy confidence estimate
+    ticks_until_event: int
+    description: str
