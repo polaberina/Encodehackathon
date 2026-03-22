@@ -125,6 +125,29 @@ def make_zone_gamma() -> Zone:
         region="south",
         morale=80.0, reputation=85.0,
     )
+
+
+def make_zone_delta() -> Zone:
+    """Nuclear baseline zone in the east. Stable output, resilience-focused."""
+    nuclear = EnergySource(
+        source_id="delta_nuclear",
+        energy_type=EnergyType.NUCLEAR,
+        low_output_rate=90.0,
+        high_output_rate=120.0,
+        resilience=0.95,
+        degradation_rate=0.0005,
+    )
+    return Zone(
+        zone_id="delta",
+        name="Delta",
+        sources=[nuclear],
+        storage=Storage(capacity=700.0, stored_energy=350.0),
+        economy=Economy(budget_per_tick=100.0, budget=200.0),
+        base_demand=60.0,
+        region="south",
+        morale=88.0,
+        reputation=92.0,
+    )
  
  
 def make_routes():
@@ -240,6 +263,7 @@ def main():
     engine.add_zone(make_zone_alpha())
     engine.add_zone(make_zone_beta())
     engine.add_zone(make_zone_gamma())
+    engine.add_zone(make_zone_delta())
     for route in make_routes():
         engine.add_trade_route(route)
  
