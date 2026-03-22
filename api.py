@@ -7,13 +7,18 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 
+import threading
+import time
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from models import EnergyType, StabilityState, Zone, EnergySource, TradeRoute, Storage, Economy
 from engine import SimulationEngine
-from run_demo import make_zone_alpha, make_zone_beta, make_zone_gamma, make_zone_delta, make_routes
+from run_demo import make_zone_alpha, make_zone_beta, make_zone_gamma, make_routes
 from crisis_agent import create_crisis_graph, make_crisis_hook
+from graph import create_zone_graph
+from state import make_initial_state
 
 app = FastAPI()
 
@@ -33,7 +38,6 @@ def _build_engine() -> SimulationEngine:
     engine.add_zone(make_zone_alpha())
     engine.add_zone(make_zone_beta())
     engine.add_zone(make_zone_gamma())
-    engine.add_zone(make_zone_delta())
     for route in make_routes():
         engine.add_trade_route(route)
 
@@ -41,9 +45,40 @@ def _build_engine() -> SimulationEngine:
     crisis_graph = create_crisis_graph(engine, llm_model=llm_model)
     engine.crisis_hook = make_crisis_hook(crisis_graph)
 
+    # ── Governor hook: one AI zone agent per zone ─────────────────────────
+    governor_llm = os.environ.get("GOVERNOR_LLM_MODEL", "gpt-4o-mini")
+    zone_graphs = {
+        zone_id: create_zone_graph(engine, zone_id, llm_model=governor_llm)
+        for zone_id in engine.zones
+    }
+    timing_log = []
+
+    def governor_hook(eng, zone):
+        graph = zone_graphs.get(zone.zone_id)
+        if graph is None:
+            return
+        t0 = time.perf_counter()
+        init_state = make_initial_state(zone.zone_id)
+        try:
+            final_state = graph.invoke(init_state)
+        except Exception as exc:
+            print(f"\n  ⚠️  [Governor] Exception in zone {zone.zone_id}: {exc}")
+            return
+        elapsed = time.perf_counter() - t0
+        timing_log.append({
+            "tick":    eng.tick_number,
+            "zone_id": zone.zone_id,
+            "elapsed": elapsed,
+            "actions": len(final_state.get("executed_results", [])),
+            "skipped": final_state.get("skip_planning", False),
+        })
+
+    engine.governor_hook = governor_hook
+
     return engine
 
 engine = _build_engine()
+_tick_lock = threading.Lock()
 
 # ── Serialisation helpers ─────────────────────────────────────────────────────
 
@@ -259,6 +294,10 @@ def _build_state() -> dict:
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+@app.get("/")
+def read_root():
+    return {"message": "Simulation API is running!", "status": "OK"}
+
 
 @app.get("/api/state")
 def get_state():
@@ -268,10 +307,11 @@ def get_state():
 @app.post("/api/tick")
 def advance_tick():
     global engine
-    if engine.tick_number >= 25:
+    with _tick_lock:
+        if engine.tick_number >= 25:
+            return _build_state()
+        engine.tick()
         return _build_state()
-    engine.tick()
-    return _build_state()
 
 
 @app.post("/api/reset")

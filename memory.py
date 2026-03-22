@@ -80,7 +80,7 @@ class ZoneMemory:
             from pymongo import MongoClient, DESCENDING  # noqa: F401
             self._MongoClient = MongoClient
             self._DESCENDING  = DESCENDING
-            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000, tls=True if mongo_uri.startswith("mongodb+srv") else False)
             # Force a connection attempt to surface errors early
             client.admin.command("ping")
             col = client[db_name][COLLECTION]

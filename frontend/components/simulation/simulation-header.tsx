@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
 
 export function SimulationHeader() {
   const pathname = usePathname()
-  const { tick, isRunning, simulationState, toggleRunning, stepForward, reset } = useSimulation()
+  const { tick, isRunning, isTickInProgress, simulationState, toggleRunning, stepForward, reset } = useSimulation()
 
   const navItems = [
     { href: '/', label: 'Live Map', icon: Map },
@@ -63,13 +63,13 @@ export function SimulationHeader() {
         )}
 
         <div className="flex items-center gap-1 border-l border-border pl-4">
-          <Button variant="ghost" size="icon" onClick={toggleRunning} className="h-8 w-8">
+          <Button variant="ghost" size="icon" onClick={toggleRunning} disabled={isTickInProgress && !isRunning} className="h-8 w-8">
             {isRunning ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
           </Button>
-          <Button variant="ghost" size="icon" onClick={stepForward} disabled={isRunning} className="h-8 w-8">
+          <Button variant="ghost" size="icon" onClick={stepForward} disabled={isRunning || isTickInProgress} className="h-8 w-8">
             <SkipForward className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="icon" onClick={reset} className="h-8 w-8">
+          <Button variant="ghost" size="icon" onClick={reset} disabled={isTickInProgress} className="h-8 w-8">
             <RotateCcw className="h-4 w-4" />
           </Button>
         </div>
