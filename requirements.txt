@@ -1,2 +1,8 @@
 fastapi
 uvicorn[standard]
+fastapi
+uvicorn[standard]
+langgraph
+langchain-openai
+langchain-core
+pymongo
