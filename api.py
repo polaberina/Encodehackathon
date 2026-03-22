@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from models import EnergyType, StabilityState, Zone, EnergySource, TradeRoute, Storage, Economy
 from engine import SimulationEngine
 from run_demo import make_zone_alpha, make_zone_beta, make_zone_gamma, make_zone_delta, make_routes
+from crisis_agent import create_crisis_graph, make_crisis_hook
 
 app = FastAPI()
 
@@ -35,6 +36,10 @@ def _build_engine() -> SimulationEngine:
     engine.add_zone(make_zone_delta())
     for route in make_routes():
         engine.add_trade_route(route)
+
+    llm_model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+    crisis_graph = create_crisis_graph(engine, llm_model=llm_model)
+    engine.crisis_hook = make_crisis_hook(crisis_graph)
 
     return engine
 
