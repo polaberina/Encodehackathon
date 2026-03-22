@@ -62,38 +62,62 @@ The Crisis Agent can trigger 10 distinct crisis types:
 
 Crises have severity levels and can trigger cascading effects across connected zones.
 
-## Installation
+## Installation & Running
+
+### Prerequisites
+
+- Python 3.9+
+- Node.js 18+ and npm (or pnpm)
+- An OpenAI API key
+
+### 1. Clone & configure
 
 ```bash
-# Clone the repository
 git clone https://github.com/yourusername/react-energy-sim.git
 cd react-energy-sim
 
-# Install dependencies
-# [Add your specific installation commands here]
-
-# Set up environment variables
-cp .env.example .env
-# Configure your LLM API keys and settings
-
-# Run the simulation
-# [Add your run commands here]
+# Add your OpenAI API key
+echo "OPENAI_API_KEY=sk-..." > .env
 ```
 
-## Usage
-
-### Basic Simulation
+### 2. Backend (FastAPI)
 
 ```bash
-# Start a standard 4-zone simulation
-# [Add command]
+# Install Python dependencies
+pip install -r requirements.txt
 
-# Run with custom configuration
-# [Add command with config file]
-
-# Enable debug mode
-# [Add debug command]
+# Start the API server (runs on http://localhost:8000)
+uvicorn api:app --reload --port 8000
 ```
+
+### 3. Frontend (Next.js)
+
+```bash
+cd frontend
+
+# Install dependencies
+npm install   # or: pnpm install
+
+# Start the dev server (runs on http://localhost:3000)
+npm run dev
+```
+
+### Run both at once
+
+A convenience script is included at the project root:
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+This starts the backend on `http://localhost:8000` and the frontend on `http://localhost:3000` simultaneously.
+
+### API docs
+
+Once the backend is running, interactive API docs are available at:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
 
 ### Configuration
 
