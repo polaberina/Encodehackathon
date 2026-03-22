@@ -27,7 +27,7 @@ export type CrisisTier = 'light' | 'medium' | 'heavy' | 'brutal'
 
 export type ZoneStrategy = 'aggressive' | 'defensive' | 'economic' | 'resilience'
 
-export type ZoneArchetype = 'alpha' | 'beta' | 'gamma' | 'delta'
+export type ZoneArchetype = 'alpha' | 'beta' | 'gamma'
 
 // Governor action types from engine.py ACTION_COSTS
 export type GovernorActionType = 
@@ -235,7 +235,6 @@ export const ZONE_COUNTRY_CODES: Record<ZoneArchetype, string> = {
   alpha: 'DEU',
   beta: 'FRA',
   gamma: 'POL',
-  delta: 'UKR',
 }
 
 export const ZONE_CONFIGS: Record<ZoneArchetype, ZoneConfig> = {
@@ -252,9 +251,9 @@ export const ZONE_CONFIGS: Record<ZoneArchetype, ZoneConfig> = {
   beta: {
     archetype: 'beta',
     name: 'Beta',
-    description: 'Nuclear & hydro mix, defensive strategy',
+    description: 'Hydro zone, defensive strategy',
     strategy: 'defensive',
-    primaryEnergy: ['nuclear', 'hydro'],
+    primaryEnergy: ['hydro'],
     color: '#3B82F6',
     icon: 'shield',
     region: 'north',
@@ -264,19 +263,9 @@ export const ZONE_CONFIGS: Record<ZoneArchetype, ZoneConfig> = {
     name: 'Gamma',
     description: 'Fossil dependent, economic focus',
     strategy: 'economic',
-    primaryEnergy: ['fossil', 'nuclear'],
+    primaryEnergy: ['fossil'],
     color: '#F97316',
     icon: 'trending-up',
-    region: 'south',
-  },
-  delta: {
-    archetype: 'delta',
-    name: 'Delta',
-    description: 'Nuclear baseline, resilience-focused',
-    strategy: 'resilience',
-    primaryEnergy: ['nuclear', 'hydro'],
-    color: '#A855F7',
-    icon: 'atom',
     region: 'south',
   },
 }

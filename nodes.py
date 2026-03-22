@@ -31,7 +31,6 @@ from typing import Optional
 # LangChain imports
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, START, END
@@ -39,7 +38,6 @@ from langgraph.types import Send
 from langgraph.prebuilt import create_react_agent 
 from pydantic import BaseModel, Field
 from valyu import Valyu 
-from langchain.messages import SystemMessage, HumanMessage
 from langchain.chat_models import init_chat_model
  
 # Local imports — resolve relative to project root

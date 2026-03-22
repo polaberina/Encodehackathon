@@ -54,16 +54,16 @@ export function generateZoneEnergySources(archetype: ZoneArchetype, random: () =
 }
 
 export function generateInitialZones(random: () => number): Zone[] {
-  const archetypes: ZoneArchetype[] = ['alpha', 'beta', 'gamma', 'delta']
+  const archetypes: ZoneArchetype[] = ['alpha', 'beta', 'gamma']
   
   return archetypes.map((archetype, i) => {
     const config = ZONE_CONFIGS[archetype]
     const energySources = generateZoneEnergySources(archetype, random)
     const totalSupply = energySources.reduce((sum, s) => sum + s.currentOutput, 0)
     
-    const storageMultiplier = archetype === 'gamma' ? 1.5 : archetype === 'delta' ? 1.3 : archetype === 'alpha' ? 0.8 : 1
+    const storageMultiplier = archetype === 'gamma' ? 1.5 : archetype === 'alpha' ? 0.8 : 1
     const maxStorage = 1000 * storageMultiplier
-    const baseDemand = archetype === 'gamma' ? 180 : archetype === 'delta' ? 150 : 120
+    const baseDemand = archetype === 'gamma' ? 180 : archetype === 'beta' ? 150 : 120
     
     const storage = maxStorage * (0.4 + random() * 0.4)
     const demand = baseDemand * (0.8 + random() * 0.4)
@@ -110,7 +110,8 @@ export function generateInitialZones(random: () => number): Zone[] {
 export function generateTradeRoutes(zones: Zone[], random: () => number): TradeRoute[] {
   const routes: TradeRoute[] = []
   const connections = [
-    [0, 1], [1, 3], [3, 2], [2, 0], [0, 3], [1, 2],
+    [0, 2], // alpha -> gamma
+    [1, 2], // beta -> gamma
   ]
 
   connections.forEach(([a, b], i) => {
@@ -285,26 +286,26 @@ export function generateNegotiations(zones: Zone[]): TradeNegotiation[] {
     {
       id: 'neg-1',
       fromZoneId: zones[0].id,
-      toZoneId: zones[1].id,
+      toZoneId: zones[2].id,
       energyOffered: 45,
       budgetOffered: 0,
       energyRequested: 0,
       budgetRequested: 50,
       expiresAtTick: 100,
       status: 'pending',
-      description: 'Alpha selling surplus solar to Beta',
+      description: 'Alpha selling surplus solar to Gamma',
     },
     {
       id: 'neg-2',
-      fromZoneId: zones[2].id,
-      toZoneId: zones[3].id,
-      energyOffered: 0,
-      budgetOffered: 80,
-      energyRequested: 60,
-      budgetRequested: 0,
+      fromZoneId: zones[1].id,
+      toZoneId: zones[2].id,
+      energyOffered: 30,
+      budgetOffered: 0,
+      energyRequested: 0,
+      budgetRequested: 40,
       expiresAtTick: 100,
       status: 'accepted',
-      description: 'Gamma buying nuclear power from Delta',
+      description: 'Beta selling hydro power to Gamma',
     },
   ]
 }

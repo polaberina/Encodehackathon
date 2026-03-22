@@ -10,17 +10,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from models import EnergyType, StabilityState
+from models import EnergyType, StabilityState, Zone, EnergySource, TradeRoute, Storage, Economy
 from engine import SimulationEngine
-from run_demo import (
-    make_zone_alpha, make_zone_beta, make_zone_gamma, make_zone_delta, make_routes,
-    c_equipment_failure, c_drought, c_embargo, c_cyber_attack,
-    c_heat_wave, c_worker_strike, c_storage_leak, c_wildfire,
-    c_regional_blackout, c_recession, c_transmission_surge,
-    _actions_tick4, _actions_tick6, _actions_tick8, _actions_tick10,
-    _actions_tick12, _actions_tick14, _actions_tick15, _actions_tick16,
-    _actions_tick20,
-)
+from run_demo import make_zone_alpha, make_zone_beta, make_zone_gamma, make_zone_delta, make_routes
 
 app = FastAPI()
 
@@ -44,32 +36,7 @@ def _build_engine() -> SimulationEngine:
     for route in make_routes():
         engine.add_trade_route(route)
 
-    engine.schedule_crisis(c_equipment_failure(), fire_at_tick=3,  warning_probability=0.80)
-    engine.schedule_crisis(c_drought(),           fire_at_tick=5,  warning_probability=0.90)
-    engine.schedule_crisis(c_embargo(),           fire_at_tick=7,  warning_probability=0.60)
-    engine.schedule_crisis(c_cyber_attack(),      fire_at_tick=9,  warning_probability=0.50)
-    engine.schedule_crisis(c_heat_wave(),         fire_at_tick=11, warning_probability=0.85)
-    engine.schedule_crisis(c_worker_strike(),     fire_at_tick=13, warning_probability=0.70)
-    engine.schedule_crisis(c_storage_leak(),      fire_at_tick=15, warning_probability=0.65)
-    engine.schedule_crisis(c_wildfire(),          fire_at_tick=17, warning_probability=0.75)
-    engine.schedule_crisis(c_regional_blackout(), fire_at_tick=19, warning_probability=0.80)
-    engine.schedule_crisis(c_recession(),         fire_at_tick=22, warning_probability=0.90)
-    engine.schedule_crisis(c_transmission_surge(),fire_at_tick=23, warning_probability=0.70)
-
     return engine
-
-
-GOVERNOR_DISPATCH = {
-    4:  _actions_tick4,
-    6:  _actions_tick6,
-    8:  _actions_tick8,
-    10: _actions_tick10,
-    12: _actions_tick12,
-    14: _actions_tick14,
-    15: _actions_tick15,
-    16: _actions_tick16,
-    20: _actions_tick20,
-}
 
 engine = _build_engine()
 
@@ -298,16 +265,7 @@ def advance_tick():
     global engine
     if engine.tick_number >= 25:
         return _build_state()
-
     engine.tick()
-
-    # Run hardcoded governor actions
-    if engine.tick_number in GOVERNOR_DISPATCH:
-        try:
-            GOVERNOR_DISPATCH[engine.tick_number](engine)
-        except Exception as e:
-            pass  # Don't crash the API on demo action errors
-
     return _build_state()
 
 

@@ -15,25 +15,18 @@ const COUNTRY_CENTROIDS: Record<string, [number, number]> = {
   DEU: [10.5, 51.2],
   FRA: [2.5, 46.5],
   POL: [19.4, 52.0],
-  UKR: [31.2, 48.8],
 }
 
-// Info box positions — placed so the box edge touches the centroid (route endpoint)
-// Each box is 130px wide, 24px tall in SVG units; offset so it sits just outside the country
+// Info box positions
 const LABEL_OFFSETS: Record<string, { dx: number; dy: number }> = {
   DEU: { dx: -8, dy: -8 },   // above-left
   FRA: { dx: -8, dy:  8 },   // below-left
   POL: { dx:  8, dy: -8 },   // above-right
-  UKR: { dx:  8, dy:  8 },   // below-right
 }
 
-// Trade route connections
+// Trade route connections: alpha(DEU)->gamma(POL), beta(FRA)->gamma(POL)
 const TRADE_CONNECTIONS: [string, string][] = [
-  ['DEU', 'FRA'],
   ['DEU', 'POL'],
-  ['POL', 'UKR'],
-  ['FRA', 'DEU'],
-  ['DEU', 'UKR'],
   ['FRA', 'POL'],
 ]
 

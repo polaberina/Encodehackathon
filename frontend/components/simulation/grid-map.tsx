@@ -309,16 +309,6 @@ function drawZoneShape(
       ctx.lineTo(x - radius * 0.85, y)
       ctx.closePath()
       break
-    case 'delta': // Hexagon for nuclear/tech
-      for (let i = 0; i < 6; i++) {
-        const angle = (Math.PI / 3) * i - Math.PI / 2
-        const px = x + radius * 0.9 * Math.cos(angle)
-        const py = y + radius * 0.9 * Math.sin(angle)
-        if (i === 0) ctx.moveTo(px, py)
-        else ctx.lineTo(px, py)
-      }
-      ctx.closePath()
-      break
     default:
       ctx.arc(x, y, radius, 0, Math.PI * 2)
   }

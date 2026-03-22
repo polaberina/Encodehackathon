@@ -42,7 +42,6 @@ const zoneColors: Record<string, string> = {
   Alpha: ZONE_CONFIGS.alpha.color,
   Beta: ZONE_CONFIGS.beta.color,
   Gamma: ZONE_CONFIGS.gamma.color,
-  Delta: ZONE_CONFIGS.delta.color,
 }
 
 export function AgentActivity({ actions, negotiations }: AgentActivityProps) {
