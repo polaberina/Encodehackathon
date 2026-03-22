@@ -1,241 +1,207 @@
-# Energy Crisis Management AI
+# R.E.A.C.T
+**Resilient Energy Autonomous Crisis Taskforce**
 
-A multi-agent AI simulation that models energy crisis management using LLM-powered governor agents. Each agent independently manages an energy zone — responding to dynamic crises, trading energy across a network, and making autonomous decisions under budget constraints. An adversarial Crisis Agent introduces disruptions to stress-test the governors' decision-making.
+A multi-agent energy grid simulation featuring LLM-powered autonomous agents that manage energy zones, respond to crises, and trade resources in a tick-based game environment.
 
-Built with **LangGraph**, **LangChain**, and **OpenAI**.
+## Overview
 
----
+R.E.A.C.T is an advanced energy grid simulation that models real-world energy management challenges through intelligent agent-based gameplay. The system simulates energy production, distribution, and crisis response across multiple interconnected zones, each governed by an AI agent with strategic decision-making capabilities.
 
-## Architecture
+### Key Features
 
-The system is organized into three layers:
+- **🤖 LLM-Powered Governor Agents**: Each energy zone is managed by an autonomous AI agent that makes strategic decisions about energy production, trading, and crisis response
+- **⚡ Dynamic Energy Trading**: Zones can establish trade routes to buy and sell energy, with health mechanics that degrade under stress
+- **🔥 Crisis Management**: An adversarial Crisis Agent introduces realistic challenges including blackouts, infrastructure failures, extreme weather, and cyberattacks
+- **🌍 Diverse Energy Sources**: 8 different generation types including renewables (solar, wind, hydro), conventional (coal, natural gas), and alternatives (nuclear, biomass)
+- **📊 Tick-Based Simulation**: Game loop with 9-step execution order covering demand calculations, generation, trading, crisis resolution, and state updates
+- **🎯 Strategic Gameplay**: Win/loss conditions based on zone survival, economic performance, and crisis resilience
 
-**Simulation Engine** (`simulation/`) — The physics engine and source of truth. Handles energy production, trade flows, demand consumption, seasonal effects, and crisis mechanics across a deterministic tick-based game loop.
+## Energy Sources
 
-**Governor Agents** (`agents/`) — One LangGraph pipeline per zone. Each tick, a zone's agent observes its state, drafts a situation report, plans actions, runs them through a risk assessment gate, and executes approved actions via the engine. Agents operate independently with no direct coordination — cooperation emerges through trade offers and diplomacy.
+The simulation models 8 distinct energy generation types, each with unique characteristics:
 
-**Crisis Agent** (`crisis_agent.py`) — An adversarial LangGraph agent that analyzes the board and injects crises (supply disruptions, cyberattacks, droughts, political embargoes, etc.) to challenge the governors. Its budget scales with game progression.
+| Source | Output | Key Characteristics |
+|--------|--------|---------------------|
+| Solar | 40 MW | Day/night cycle, weather-dependent |
+| Wind | 35 MW | Variable output, high resilience |
+| Hydro | 60 MW | Steady output, water dependency |
+| Natural Gas | 80 MW | Reliable, moderate emissions |
+| Coal | 100 MW | High output, stockpile depletion |
+| Nuclear | 120 MW | Stable baseline, long cooldowns |
+| Biomass | 45 MW | Renewable, fuel-dependent |
+| Geothermal | 50 MW | Consistent, location-specific |
 
-```
-run_ai_demo.py          # Entry point — orchestrates the full simulation
-crisis_agent.py         # Adversarial crisis injection agent
+## Zone Actions
 
-simulation/
-├── models.py           # Data classes: Zone, EnergySource, TradeRoute, CrisisEvent, etc.
-└── engine.py           # Tick loop, action execution, physics calculations
+Governor agents can execute strategic actions each tick:
 
-agents/
-├── state.py            # Shared AgentState TypedDict flowing through the graph
-├── nodes.py            # 7 agent node functions + routing logic
-├── graph.py            # LangGraph StateGraph construction
-└── memory.py           # MongoDB-backed zone memory persistence (planned)
-```
+- **Build Generator**: Construct new energy production facilities
+- **Upgrade Storage**: Increase energy storage capacity
+- **Establish Trade Route**: Create energy trading connections
+- **Repair Infrastructure**: Restore damaged systems
+- **Stockpile Resources**: Build reserves for fuel-dependent sources
+- **Research Tech**: Unlock efficiency improvements
+- **Emergency Response**: Mitigate active crisis events
 
-### Agent Pipeline
+Each action has energy costs, cooldown periods, and strategic trade-offs.
 
-Each governor agent runs through this graph each tick:
+## Crisis Events
 
-1. **Supervisor Gate** — Deterministic entry point. Routes based on stability, active crises, and pending messages.
-2. **Situation Awareness** — LLM analyzes zone telemetry and identifies threats.
-3. **Planning** — LLM generates a JSON list of proposed actions with cost estimates.
-4. **Risk Assessment** — LLM reviews costs against budget; approves, rejects, or requests revision (max 2 retries).
-5. **Execution** — Applies approved actions through the engine's action methods.
-6. **Report** — LLM generates a human-readable tick narrative.
-7. **Communication** — LLM handles incoming trade offers, aid requests, and diplomacy.
+The Crisis Agent can trigger 10 distinct crisis types:
 
----
+1. **Blackout**: Sudden generation loss
+2. **Infrastructure Failure**: Transmission damage
+3. **Fuel Shortage**: Supply chain disruption
+4. **Extreme Weather**: Multi-source degradation
+5. **Demand Surge**: Unexpected load spike
+6. **Cyberattack**: System compromise
+7. **Natural Disaster**: Catastrophic multi-zone impact
+8. **Equipment Failure**: Generator outages
+9. **Grid Instability**: Cascading failures
+10. **Political Crisis**: Trade restrictions
 
-## Prerequisites
-
-- Python 3.10+
-- An [OpenAI API key](https://platform.openai.com/api-keys)
-- MongoDB (optional — for agent memory persistence)
-
----
+Crises have severity levels and can trigger cascading effects across connected zones.
 
 ## Installation
 
-Clone the repository and install dependencies:
-
 ```bash
-git clone <repo-url>
-cd energy-crisis
-pip install -r requirements.txt
+# Clone the repository
+git clone https://github.com/yourusername/react-energy-sim.git
+cd react-energy-sim
+
+# Install dependencies
+# [Add your specific installation commands here]
+
+# Set up environment variables
+cp .env.example .env
+# Configure your LLM API keys and settings
+
+# Run the simulation
+# [Add your run commands here]
 ```
-
-Set your OpenAI API key:
-
-```bash
-export OPENAI_API_KEY="sk-..."
-```
-
----
 
 ## Usage
 
-### Run the AI simulation
+### Basic Simulation
 
 ```bash
-python run_ai_demo.py
+# Start a standard 4-zone simulation
+# [Add command]
+
+# Run with custom configuration
+# [Add command with config file]
+
+# Enable debug mode
+# [Add debug command]
 ```
 
-### Command-line options
+### Configuration
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--ticks N` | Number of simulation ticks | `25` |
-| `--zones alpha,beta` | Comma-separated zones to enable AI for | all zones |
-| `--model NAME` | OpenAI model to use | `gpt-4o` |
-| `--no-crises` | Disable the adversarial crisis agent | crises enabled |
-| `--seed N` | RNG seed for reproducibility | `42` |
+The simulation supports customizable zone setups. Four default configurations are provided:
 
-**Examples:**
+- **Alpha Zone**: Renewable-heavy (solar/wind), low storage, aggressive trading
+- **Beta Zone**: Balanced mix, moderate storage, defensive strategy
+- **Gamma Zone**: Coal/gas dependent, high storage, economic focus
+- **Delta Zone**: Nuclear baseline, advanced tech, resilience-focused
 
-```bash
-# Run 50 ticks with only Alpha and Beta zones
-python run_ai_demo.py --ticks 50 --zones alpha,beta
+### Governor Agent Behavior
 
-# Run without crises for baseline testing
-python run_ai_demo.py --no-crises
+Each Governor Agent receives:
+- Zone state (energy balance, storage, generation capacity)
+- Market conditions (trade prices, route health)
+- Crisis status (active events, threat level)
+- Historical performance data
 
-# Use a different model
-python run_ai_demo.py --model gpt-4o-mini
-```
+Agents make decisions by:
+1. Analyzing margin-based error thresholds
+2. Evaluating strategic priorities
+3. Selecting optimal actions within energy budget
+4. Adapting to emerging crisis patterns
 
-### Run the hardcoded demo (Phase 1)
+## Architecture
 
-A non-AI demo with hardcoded zone actions, useful for testing the engine in isolation:
+### Game Loop (9-Step Tick Execution)
 
-```bash
-python run_demo.py
-```
+1. **Demand Calculation**: Compute zone energy needs
+2. **Generation Phase**: Produce energy from active sources
+3. **Storage Management**: Charge/discharge batteries
+4. **Trade Execution**: Process energy transfers
+5. **Crisis Events**: Trigger and resolve crises
+6. **Action Processing**: Execute Governor decisions
+7. **State Updates**: Recalculate zone conditions
+8. **Margin Detection**: Identify threshold violations
+9. **Logging & Scoring**: Record performance metrics
 
----
+### Data Selection Framework
 
-## Zone Setup
+The system uses margin-based thresholds to identify critical events:
+- **Energy Balance**: ±10% variance
+- **Storage Levels**: <20% or >95%
+- **Generation Efficiency**: <85% rated capacity
+- **Trade Route Health**: <70% operational
+- **Crisis Severity**: All events logged
 
-The simulation initializes three zones by default:
+## Scoring & Win Conditions
 
-| Zone | Region | Energy Sources | Notes |
-|------|--------|---------------|-------|
-| Alpha | Temperate | Solar, Wind | Balanced generation |
-| Beta | Coastal | Hydro | Seasonal variability |
-| Gamma | Industrial | Fossil | High demand pressure |
+Zones are evaluated on:
+- **Survival**: Maintain positive energy balance
+- **Economic Performance**: Trade profitability
+- **Resilience**: Crisis recovery speed
+- **Efficiency**: Resource utilization
 
----
+Victory conditions:
+- ✅ All zones survive 100+ ticks
+- ✅ No zone falls below 20% storage
+- ✅ Successful crisis mitigation rate >80%
 
-## Connecting to MongoDB
+## Development Roadmap
 
-MongoDB provides persistent memory for governor agents, allowing them to reference past decisions and learn from previous ticks. The simulation works without MongoDB (agents simply operate without historical context), but enabling it improves long-term decision quality.
+### Phase 1: MVP Environment ✅
+- Core simulation engine
+- Basic Governor Agents
+- 10 crisis types
+- 4 default zone configurations
 
-### 1. Install MongoDB
+### Phase 2: Advanced Features (Planned)
+- Machine learning for agent optimization
+- Real-time visualization dashboard
+- Multi-player competitive mode
+- Historical data replay
 
-**macOS (Homebrew):**
+### Phase 3: Research Integration (Future)
+- ENTSO-E data integration
+- Academic collaboration tools
+- Policy simulation scenarios
 
-```bash
-brew tap mongodb/brew
-brew install mongodb-community
-brew services start mongodb-community
-```
+## Contributing
 
-**Ubuntu/Debian:**
-
-```bash
-sudo apt update
-sudo apt install -y gnupg curl
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-sudo apt update
-sudo apt install -y mongodb-org
-sudo systemctl start mongod
-sudo systemctl enable mongod
-```
-
-**Docker:**
-
-```bash
-docker run -d --name energy-crisis-mongo -p 27017:27017 mongo:7
-```
-
-**MongoDB Atlas (cloud):**
-
-Create a free cluster at [mongodb.com/atlas](https://www.mongodb.com/atlas) and obtain your connection string.
-
-### 2. Configure the connection
-
-Set the MongoDB connection URI as an environment variable:
-
-```bash
-# Local instance (default)
-export MONGODB_URI="mongodb://localhost:27017"
-
-# Atlas or remote instance
-export MONGODB_URI="mongodb+srv://<username>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority"
-```
-
-The application uses a database called `energy_crisis` with a collection per zone (e.g., `zone_alpha_memory`). These are created automatically on first write.
-
-### 3. Verify the connection
-
-```bash
-# Check that MongoDB is running locally
-mongosh --eval "db.runCommand({ ping: 1 })"
-```
-
-From Python:
-
-```python
-from pymongo import MongoClient
-
-client = MongoClient("mongodb://localhost:27017")
-db = client["energy_crisis"]
-print(db.list_collection_names())
-```
-
-### 4. Memory schema
-
-Each tick record stored in MongoDB follows this structure:
-
-```json
-{
-  "zone_id": "alpha",
-  "tick": 12,
-  "timestamp": "2026-03-21T14:30:00Z",
-  "stability": "WARNING",
-  "storage_pct": 0.45,
-  "actions_taken": [
-    {"action": "repair_source", "target": "solar_farm_1", "cost": 50}
-  ],
-  "crises_active": ["DROUGHT"],
-  "situation_summary": "...",
-  "tick_report": "..."
-}
-```
-
-Agents retrieve the last N records (default 5) at the start of each tick to build historical context for their decision-making.
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `OPENAI_API_KEY` | Yes | Your OpenAI API key |
-| `MONGODB_URI` | No | MongoDB connection string (defaults to `mongodb://localhost:27017`) |
-
----
-
-## Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `langgraph` >= 0.2.0 | Multi-agent graph orchestration |
-| `langchain-openai` >= 0.3.0 | OpenAI LLM integration |
-| `langchain-core` >= 0.3.0 | Core LangChain abstractions |
-| `pymongo` >= 4.6.0 | MongoDB driver for agent memory |
-
----
+Contributions are welcome! Areas of interest:
+- Governor Agent strategy improvements
+- New crisis event types
+- Visualization enhancements
+- Performance optimization
+- Documentation
 
 ## License
 
-This project is provided as-is for research and educational purposes.
+[Add your license here]
+
+## Acknowledgments
+
+Research frameworks consulted:
+- ASSUME (Agent-based Simulation of Markets for Energy)
+- PyPSA-Eur (European power system analysis)
+- Power TAC (Trading Agent Competition)
+
+Data sources:
+- ENTSO-E Transparency Platform
+- Open Power System Data (OPSD)
+- Renewables.ninja
+
+## Contact
+
+[Add contact information]
+
+---
+
+*Built with autonomous agents. Powered by crisis resilience.*
